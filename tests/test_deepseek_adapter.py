@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -7,7 +8,7 @@ import pytest
 from openai import APIConnectionError
 from openai.types.chat import ChatCompletion
 
-from wesly.context import ChronologicalV1ContextBuilder
+from wesly.context import DirectAnswerContextBuilder
 from wesly.deepseek import DeepSeekAdapter
 from wesly.model import ModelProviderError, ModelTurn, Usage
 
@@ -40,7 +41,7 @@ def test_adapter_maps_a_sanitized_deepseek_response() -> None:
         model="deepseek-v4-pro",
     )
 
-    turn = adapter.complete(ChronologicalV1ContextBuilder().build("这是什么项目？"))
+    turn = adapter.complete(DirectAnswerContextBuilder().build("这是什么项目？"))
 
     assert turn == ModelTurn(
         content="这是一个本地 Coding Agent。",
@@ -61,7 +62,6 @@ def test_adapter_maps_a_sanitized_deepseek_response() -> None:
             {"role": "user", "content": "这是什么项目？"},
         ],
         "stream": False,
-        "max_tokens": 8_000,
         "extra_body": {"thinking": {"type": "disabled"}},
     }
 
@@ -78,7 +78,7 @@ def test_adapter_maps_sdk_errors_to_a_safe_provider_error() -> None:
     )
 
     with pytest.raises(ModelProviderError, match="无法连接模型服务"):
-        adapter.complete(ChronologicalV1ContextBuilder().build("检查项目"))
+        adapter.complete(DirectAnswerContextBuilder().build("检查项目"))
 
 
 def test_adapter_rejects_a_response_without_choices() -> None:
@@ -102,4 +102,20 @@ def test_adapter_rejects_a_response_without_choices() -> None:
     )
 
     with pytest.raises(ModelProviderError, match="模型服务返回了无法解析的响应"):
-        adapter.complete(ChronologicalV1ContextBuilder().build("检查项目"))
+        adapter.complete(DirectAnswerContextBuilder().build("检查项目"))
+
+
+def test_direct_answer_adapter_rejects_tools_instead_of_dropping_them() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "deepseek" / "direct_answer.json"
+    response = ChatCompletion.model_validate(json.loads(fixture_path.read_text("utf-8")))
+    adapter = DeepSeekAdapter(
+        client=RecordingOpenAIClient(RecordingCompletions(response)),
+        model="deepseek-v4-pro",
+    )
+    request = replace(
+        DirectAnswerContextBuilder().build("检查项目"),
+        tools=({"type": "function"},),
+    )
+
+    with pytest.raises(ModelProviderError, match="当前切片尚未支持模型工具"):
+        adapter.complete(request)

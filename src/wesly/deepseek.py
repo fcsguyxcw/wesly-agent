@@ -14,23 +14,29 @@ class DeepSeekAdapter:
         self._model = model
 
     def complete(self, request: ModelRequest) -> ModelTurn:
+        if request.tools:
+            raise ModelProviderError("当前切片尚未支持模型工具")
+
+        provider_request: dict[str, Any] = {
+            "model": self._model,
+            "messages": (
+                [
+                    {"role": "system", "content": instruction}
+                    for instruction in request.instructions
+                ]
+                + [
+                    {"role": message.role, "content": message.content}
+                    for message in request.messages
+                ]
+            ),
+            "stream": False,
+            "extra_body": {"thinking": {"type": "disabled"}},
+        }
+        if request.budget.output_tokens is not None:
+            provider_request["max_tokens"] = request.budget.output_tokens
+
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=(
-                    [
-                        {"role": "system", "content": instruction}
-                        for instruction in request.instructions
-                    ]
-                    + [
-                        {"role": message.role, "content": message.content}
-                        for message in request.messages
-                    ]
-                ),
-                stream=False,
-                max_tokens=request.budget.output_tokens,
-                extra_body={"thinking": {"type": "disabled"}},
-            )
+            response = self._client.chat.completions.create(**provider_request)
         except APIConnectionError as error:
             raise ModelProviderError("无法连接模型服务") from error
         except OpenAIError as error:

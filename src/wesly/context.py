@@ -7,9 +7,7 @@ class ContextBuilder(Protocol):
     def build(self, task: str) -> ModelRequest: ...
 
 
-class ChronologicalV1ContextBuilder:
-    policy_version = "chronological-v1"
-
+class DirectAnswerContextBuilder:
     def build(self, task: str) -> ModelRequest:
         return ModelRequest(
             instructions=(
@@ -18,5 +16,5 @@ class ChronologicalV1ContextBuilder:
             ),
             messages=(Message(role="user", content=task),),
             tools=(),
-            budget=ModelBudget(input_tokens=56_000, output_tokens=8_000),
+            budget=ModelBudget(),
         )

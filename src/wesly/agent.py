@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from wesly.context import ChronologicalV1ContextBuilder, ContextBuilder
+from wesly.context import ContextBuilder, DirectAnswerContextBuilder
 from wesly.events import AgentEvent, ModelCompleted, ModelStarted, RunCompleted, RunFailed
 from wesly.model import ModelClient, ModelProviderError
 
@@ -12,7 +12,7 @@ class Agent:
         context_builder: ContextBuilder | None = None,
     ) -> None:
         self._model_client = model_client
-        self._context_builder = context_builder or ChronologicalV1ContextBuilder()
+        self._context_builder = context_builder or DirectAnswerContextBuilder()
 
     def run(self, task: str) -> Iterator[AgentEvent]:
         turn = 1

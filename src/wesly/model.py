@@ -25,8 +25,8 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ModelBudget:
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
