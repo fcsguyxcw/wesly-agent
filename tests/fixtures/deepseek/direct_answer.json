@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-sanitized",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "这是一个本地 Coding Agent。",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1753200000,
+  "model": "deepseek-v4-pro",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 9,
+    "prompt_tokens": 15,
+    "total_tokens": 24,
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 15
+  }
+}
+

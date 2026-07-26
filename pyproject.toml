@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wesly-agent"
+version = "0.1.0"
+description = "A local personal coding agent"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.0,<3",
+]
+
+[project.scripts]
+wesly = "wesly.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15,<2",
+    "pytest>=8.0,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wesly"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
