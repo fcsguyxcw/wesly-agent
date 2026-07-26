@@ -3,3 +3,19 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+
+# Local exploratory notes that were not accepted into the decision chain.
+docs/research/research_*_20260723.md
