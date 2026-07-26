@@ -4,7 +4,7 @@ from typing import Any
 
 from openai import APIConnectionError, OpenAI, OpenAIError
 
-from wesly.model import ModelRequest, ModelTurn, ToolCall, Usage
+from wesly.model import Message, ModelRequest, ModelTurn, ToolCall, Usage
 from wesly.model import ModelProviderError
 
 
@@ -14,9 +14,6 @@ class DeepSeekAdapter:
         self._model = model
 
     def complete(self, request: ModelRequest) -> ModelTurn:
-        if request.tools:
-            raise ModelProviderError("当前切片尚未支持模型工具")
-
         provider_request: dict[str, Any] = {
             "model": self._model,
             "messages": (
@@ -24,16 +21,15 @@ class DeepSeekAdapter:
                     {"role": "system", "content": instruction}
                     for instruction in request.instructions
                 ]
-                + [
-                    {"role": message.role, "content": message.content}
-                    for message in request.messages
-                ]
+                + [_provider_message(message) for message in request.messages]
             ),
             "stream": False,
             "extra_body": {"thinking": {"type": "disabled"}},
         }
         if request.budget.output_tokens is not None:
             provider_request["max_tokens"] = request.budget.output_tokens
+        if request.tools:
+            provider_request["tools"] = list(request.tools)
 
         try:
             response = self._client.chat.completions.create(**provider_request)
@@ -74,3 +70,25 @@ def create_deepseek_adapter(*, api_key: str, model: str) -> DeepSeekAdapter:
         max_retries=0,
     )
     return DeepSeekAdapter(client=client, model=model)
+
+
+def _provider_message(message: Message) -> dict[str, Any]:
+    provider_message: dict[str, Any] = {
+        "role": message.role,
+        "content": message.content,
+    }
+    if message.tool_calls:
+        provider_message["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": call.arguments_json,
+                },
+            }
+            for call in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        provider_message["tool_call_id"] = message.tool_call_id
+    return provider_message

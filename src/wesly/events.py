@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 from wesly.model import Usage
 
@@ -13,6 +14,22 @@ class ModelCompleted:
     turn: int
     finish_reason: str
     usage: Usage
+
+
+@dataclass(frozen=True, slots=True)
+class ToolStarted:
+    call_id: str
+    tool_name: str
+    target: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCompleted:
+    call_id: str
+    tool_name: str
+    status: Literal["success", "error"]
+    target: str
+    error_code: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,4 +48,11 @@ class RunFailed:
     tool_calls: int
 
 
-AgentEvent = ModelStarted | ModelCompleted | RunCompleted | RunFailed
+AgentEvent = (
+    ModelStarted
+    | ModelCompleted
+    | ToolStarted
+    | ToolCompleted
+    | RunCompleted
+    | RunFailed
+)

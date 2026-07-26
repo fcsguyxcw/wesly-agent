@@ -4,12 +4,22 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TextIO
 
 from wesly.agent import Agent
+from wesly.context import ReadOnlyContextBuilder
 from wesly.deepseek import create_deepseek_adapter
-from wesly.events import ModelCompleted, ModelStarted, RunCompleted, RunFailed
+from wesly.events import (
+    ModelCompleted,
+    ModelStarted,
+    RunCompleted,
+    RunFailed,
+    ToolCompleted,
+    ToolStarted,
+)
 from wesly.model import ModelClient
+from wesly.tools import ToolRegistry
 
 
 def run_cli(
@@ -20,11 +30,29 @@ def run_cli(
     stderr: TextIO,
 ) -> int:
     task = args[0]
-    for event in Agent(model_client).run(task):
+    workspace = Path.cwd()
+    agent = Agent(
+        model_client,
+        context_builder=ReadOnlyContextBuilder(workspace),
+        tool_registry=ToolRegistry(workspace),
+    )
+    for event in agent.run(task):
         if isinstance(event, ModelStarted):
             print("[model] 正在调用模型", file=stdout)
         elif isinstance(event, ModelCompleted):
             print("[ok] 模型响应完成", file=stdout)
+        elif isinstance(event, ToolStarted):
+            print(
+                f"[tool] {_safe_activity_text(event.tool_name)} "
+                f"目标: {_safe_activity_text(event.target)}",
+                file=stdout,
+            )
+        elif isinstance(event, ToolCompleted):
+            label = "ok" if event.status == "success" else "error"
+            print(
+                f"[{label}] {_safe_activity_text(event.tool_name)} {event.status}",
+                file=stdout,
+            )
         elif isinstance(event, RunCompleted):
             print("[done] 运行完成", file=stdout)
             print(file=stdout)
@@ -70,6 +98,10 @@ def _configure_standard_streams() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
+
+
+def _safe_activity_text(value: str) -> str:
+    return value.encode("unicode_escape").decode("ascii")
 
 
 if __name__ == "__main__":

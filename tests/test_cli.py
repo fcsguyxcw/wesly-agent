@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from io import BytesIO, StringIO, TextIOWrapper
 
 from wesly.cli import run_cli
-from wesly.model import ModelProviderError, ModelRequest, ModelTurn, Usage
+from wesly.model import ModelProviderError, ModelRequest, ModelTurn, ToolCall, Usage
 
 
 class ScriptedModelClient:
@@ -95,3 +95,72 @@ def test_cli_activity_is_safe_on_a_windows_gbk_stream() -> None:
         "[model] 正在调用模型",
         "[ok] 模型响应完成",
     ]
+
+
+def test_cli_shows_a_safe_tool_target_without_printing_directory_content() -> None:
+    stdout = StringIO()
+    client = ScriptedModelClient(
+        [
+            ModelTurn(
+                content=None,
+                tool_calls=(
+                    ToolCall("call-1", "list_workspace", '{"path":"."}'),
+                ),
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=4, output_tokens=2),
+            ),
+            ModelTurn(
+                content="目录检查完成。",
+                tool_calls=(),
+                finish_reason="stop",
+                usage=Usage(input_tokens=8, output_tokens=3),
+            ),
+        ]
+    )
+
+    exit_code = run_cli(
+        ["检查目录"],
+        model_client=client,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert exit_code == 0
+    output = stdout.getvalue()
+    assert "[tool] list_workspace 目标: .\n" in output
+    assert "[ok] list_workspace success\n" in output
+    assert '"entries"' not in output
+    assert "模型轮次: 2 | 工具调用: 1 | tokens: 12 输入 / 5 输出" in output
+
+
+def test_cli_escapes_model_controlled_activity_text() -> None:
+    stdout = StringIO()
+    client = ScriptedModelClient(
+        [
+            ModelTurn(
+                content=None,
+                tool_calls=(
+                    ToolCall("bad\nname", "unknown\ntool", '{"path":"bad\\npath"}'),
+                ),
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=1, output_tokens=1),
+            ),
+            ModelTurn(
+                content="完成",
+                tool_calls=(),
+                finish_reason="stop",
+                usage=Usage(input_tokens=2, output_tokens=1),
+            ),
+        ]
+    )
+
+    exit_code = run_cli(
+        ["检查目录"],
+        model_client=client,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert exit_code == 0
+    assert "[tool] unknown\\ntool 目标: bad\\npath\n" in stdout.getvalue()
+    assert "[error] unknown\\ntool error\n" in stdout.getvalue()

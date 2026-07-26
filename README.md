@@ -1,6 +1,6 @@
 # Wesly
 
-Wesly 是一个面向个人长期使用的本地 Coding Agent。当前完成的是第一个纵向切片：通过 CLI 调用 DeepSeek 并输出直接回答；尚未提供文件工具、命令执行或 Session 持久化。
+Wesly 是一个面向个人长期使用的本地 Coding Agent。当前正在构建第一个纵向切片：CLI 可以调用 DeepSeek、输出直接回答，并允许模型安全地分页列出工作区目录。尚未提供文本搜索、文件读取、文件修改、命令执行或 Session 持久化。
 
 ## 环境
 

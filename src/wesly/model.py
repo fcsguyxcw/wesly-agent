@@ -7,7 +7,9 @@ from typing import Literal, Mapping, Protocol
 @dataclass(frozen=True, slots=True)
 class Message:
     role: Literal["system", "user", "assistant", "tool"]
-    content: str
+    content: str | None
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +23,16 @@ class ToolCall:
     id: str
     name: str
     arguments_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    call_id: str
+    tool_name: str
+    status: Literal["success", "error"]
+    content: str
+    error_code: str | None
+    target: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -8,9 +7,9 @@ import pytest
 from openai import APIConnectionError
 from openai.types.chat import ChatCompletion
 
-from wesly.context import DirectAnswerContextBuilder
+from wesly.context import DirectAnswerContextBuilder, ReadOnlyContextBuilder
 from wesly.deepseek import DeepSeekAdapter
-from wesly.model import ModelProviderError, ModelTurn, Usage
+from wesly.model import Message, ModelProviderError, ModelTurn, ToolCall, Usage
 
 
 class RecordingCompletions:
@@ -105,17 +104,56 @@ def test_adapter_rejects_a_response_without_choices() -> None:
         adapter.complete(DirectAnswerContextBuilder().build("检查项目"))
 
 
-def test_direct_answer_adapter_rejects_tools_instead_of_dropping_them() -> None:
+def test_adapter_maps_tools_and_tool_history_to_provider_format(
+    tmp_path: Path,
+) -> None:
     fixture_path = Path(__file__).parent / "fixtures" / "deepseek" / "direct_answer.json"
     response = ChatCompletion.model_validate(json.loads(fixture_path.read_text("utf-8")))
+    completions = RecordingCompletions(response)
     adapter = DeepSeekAdapter(
-        client=RecordingOpenAIClient(RecordingCompletions(response)),
+        client=RecordingOpenAIClient(completions),
         model="deepseek-v4-pro",
     )
-    request = replace(
-        DirectAnswerContextBuilder().build("检查项目"),
-        tools=({"type": "function"},),
+    request = ReadOnlyContextBuilder(tmp_path).build(
+        "检查项目",
+        history=(
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=(
+                    ToolCall("call-1", "list_workspace", '{"path":"."}'),
+                ),
+            ),
+            Message(
+                role="tool",
+                content='{"entries":[]}',
+                tool_call_id="call-1",
+            ),
+        ),
     )
 
-    with pytest.raises(ModelProviderError, match="当前切片尚未支持模型工具"):
-        adapter.complete(request)
+    adapter.complete(request)
+
+    assert completions.request is not None
+    assert completions.request["tools"] == list(request.tools)
+    assert completions.request["messages"][-2:] == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "list_workspace",
+                        "arguments": '{"path":"."}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": '{"entries":[]}',
+            "tool_call_id": "call-1",
+        },
+    ]
