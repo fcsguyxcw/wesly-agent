@@ -1,21 +1,25 @@
 from collections.abc import Iterator
 
+from wesly.context import ChronologicalV1ContextBuilder, ContextBuilder
 from wesly.events import AgentEvent, ModelCompleted, ModelStarted, RunCompleted, RunFailed
-from wesly.model import Message, ModelClient, ModelProviderError, ModelRequest
+from wesly.model import ModelClient, ModelProviderError
 
 
 class Agent:
-    def __init__(self, model_client: ModelClient) -> None:
+    def __init__(
+        self,
+        model_client: ModelClient,
+        context_builder: ContextBuilder | None = None,
+    ) -> None:
         self._model_client = model_client
+        self._context_builder = context_builder or ChronologicalV1ContextBuilder()
 
     def run(self, task: str) -> Iterator[AgentEvent]:
         turn = 1
         yield ModelStarted(turn=turn)
 
         try:
-            model_turn = self._model_client.complete(
-                ModelRequest(messages=(Message(role="user", content=task),))
-            )
+            model_turn = self._model_client.complete(self._context_builder.build(task))
         except ModelProviderError as error:
             yield RunFailed(
                 stop_reason="provider_error",

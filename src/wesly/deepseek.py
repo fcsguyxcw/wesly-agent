@@ -17,11 +17,18 @@ class DeepSeekAdapter:
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
-                messages=[
-                    {"role": message.role, "content": message.content}
-                    for message in request.messages
-                ],
+                messages=(
+                    [
+                        {"role": "system", "content": instruction}
+                        for instruction in request.instructions
+                    ]
+                    + [
+                        {"role": message.role, "content": message.content}
+                        for message in request.messages
+                    ]
+                ),
                 stream=False,
+                max_tokens=request.budget.output_tokens,
                 extra_body={"thinking": {"type": "disabled"}},
             )
         except APIConnectionError as error:
@@ -29,11 +36,14 @@ class DeepSeekAdapter:
         except OpenAIError as error:
             raise ModelProviderError("模型服务请求失败") from error
 
+        if not response.choices or response.usage is None:
+            raise ModelProviderError("模型服务返回了无法解析的响应")
+
         choice = response.choices[0]
         provider_usage = response.usage
         usage = Usage(
-            input_tokens=provider_usage.prompt_tokens if provider_usage else 0,
-            output_tokens=provider_usage.completion_tokens if provider_usage else 0,
+            input_tokens=provider_usage.prompt_tokens,
+            output_tokens=provider_usage.completion_tokens,
         )
         tool_calls = tuple(
             ToolCall(

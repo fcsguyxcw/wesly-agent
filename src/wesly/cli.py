@@ -26,6 +26,7 @@ def run_cli(
         elif isinstance(event, ModelCompleted):
             print("[ok] 模型响应完成", file=stdout)
         elif isinstance(event, RunCompleted):
+            print("[done] 运行完成", file=stdout)
             print(file=stdout)
             print(event.answer, file=stdout)
             print(file=stdout)

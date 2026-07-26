@@ -7,8 +7,9 @@ import pytest
 from openai import APIConnectionError
 from openai.types.chat import ChatCompletion
 
+from wesly.context import ChronologicalV1ContextBuilder
 from wesly.deepseek import DeepSeekAdapter
-from wesly.model import Message, ModelProviderError, ModelRequest, ModelTurn, Usage
+from wesly.model import ModelProviderError, ModelTurn, Usage
 
 
 class RecordingCompletions:
@@ -39,9 +40,7 @@ def test_adapter_maps_a_sanitized_deepseek_response() -> None:
         model="deepseek-v4-pro",
     )
 
-    turn = adapter.complete(
-        ModelRequest(messages=(Message(role="user", content="这是什么项目？"),))
-    )
+    turn = adapter.complete(ChronologicalV1ContextBuilder().build("这是什么项目？"))
 
     assert turn == ModelTurn(
         content="这是一个本地 Coding Agent。",
@@ -51,8 +50,18 @@ def test_adapter_maps_a_sanitized_deepseek_response() -> None:
     )
     assert completions.request == {
         "model": "deepseek-v4-pro",
-        "messages": [{"role": "user", "content": "这是什么项目？"}],
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are Wesly, a local personal coding agent. "
+                    "Answer in the user's language."
+                ),
+            },
+            {"role": "user", "content": "这是什么项目？"},
+        ],
         "stream": False,
+        "max_tokens": 8_000,
         "extra_body": {"thinking": {"type": "disabled"}},
     }
 
@@ -69,6 +78,28 @@ def test_adapter_maps_sdk_errors_to_a_safe_provider_error() -> None:
     )
 
     with pytest.raises(ModelProviderError, match="无法连接模型服务"):
-        adapter.complete(
-            ModelRequest(messages=(Message(role="user", content="检查项目"),))
-        )
+        adapter.complete(ChronologicalV1ContextBuilder().build("检查项目"))
+
+
+def test_adapter_rejects_a_response_without_choices() -> None:
+    response = ChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-empty",
+            "choices": [],
+            "created": 1_753_200_000,
+            "model": "deepseek-v4-pro",
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 0,
+                "prompt_tokens": 6,
+                "total_tokens": 6,
+            },
+        }
+    )
+    adapter = DeepSeekAdapter(
+        client=RecordingOpenAIClient(RecordingCompletions(response)),
+        model="deepseek-v4-pro",
+    )
+
+    with pytest.raises(ModelProviderError, match="模型服务返回了无法解析的响应"):
+        adapter.complete(ChronologicalV1ContextBuilder().build("检查项目"))

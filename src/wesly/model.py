@@ -24,9 +24,17 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelBudget:
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRequest:
+    instructions: tuple[str, ...]
     messages: tuple[Message, ...]
-    available_tools: tuple[Mapping[str, object], ...] = ()
+    tools: tuple[Mapping[str, object], ...]
+    budget: ModelBudget
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,4 +51,3 @@ class ModelClient(Protocol):
 
 class ModelProviderError(Exception):
     """A safe, user-facing failure reported by a model adapter."""
-

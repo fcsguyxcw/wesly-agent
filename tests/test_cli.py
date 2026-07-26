@@ -39,6 +39,7 @@ def test_cli_shows_activity_answer_and_usage() -> None:
     assert stdout.getvalue() == (
         "[model] 正在调用模型\n"
         "[ok] 模型响应完成\n"
+        "[done] 运行完成\n"
         "\n"
         "这是 Wesly。\n"
         "\n"
