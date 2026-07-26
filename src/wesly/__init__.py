@@ -1,2 +1,1 @@
 """Wesly personal coding agent."""
-

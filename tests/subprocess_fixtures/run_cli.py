@@ -28,4 +28,3 @@ raise SystemExit(
         stderr=sys.stderr,
     )
 )
-
