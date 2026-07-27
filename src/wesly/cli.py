@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TextIO
 
 from wesly.agent import Agent
-from wesly.context import ReadOnlyContextBuilder
+from wesly.context import InstructionLoadError, ReadOnlyContextBuilder
 from wesly.deepseek import create_deepseek_adapter
 from wesly.events import (
     ModelCompleted,
@@ -31,9 +31,14 @@ def run_cli(
 ) -> int:
     task = args[0]
     workspace = Path.cwd()
+    try:
+        context_builder = ReadOnlyContextBuilder(workspace)
+    except InstructionLoadError as error:
+        print(f"[error] {error.error_code}: {error}", file=stderr)
+        return 1
     agent = Agent(
         model_client,
-        context_builder=ReadOnlyContextBuilder(workspace),
+        context_builder=context_builder,
         tool_registry=ToolRegistry(workspace),
     )
     for event in agent.run(task):

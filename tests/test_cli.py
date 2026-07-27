@@ -1,5 +1,8 @@
 from collections.abc import Sequence
 from io import BytesIO, StringIO, TextIOWrapper
+from pathlib import Path
+
+import pytest
 
 from wesly.cli import run_cli
 from wesly.model import ModelProviderError, ModelRequest, ModelTurn, ToolCall, Usage
@@ -66,6 +69,27 @@ def test_cli_reports_provider_failure_with_a_nonzero_exit() -> None:
     assert exit_code == 1
     assert stdout.getvalue() == "[model] 正在调用模型\n"
     assert stderr.getvalue() == "[error] provider_error: 模型服务暂时不可用\n"
+
+
+def test_cli_reports_instruction_limit_before_calling_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "WESLY.md").write_text("x" * (16 * 1024 + 1), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = run_cli(
+        ["检查项目"],
+        model_client=ScriptedModelClient([]),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue().startswith("[error] instructions_limit: ")
 
 
 def test_cli_activity_is_safe_on_a_windows_gbk_stream() -> None:
