@@ -26,6 +26,7 @@ def test_list_workspace_paginates_sorted_entries(tmp_path: Path) -> None:
         "path": ".",
         "entries": [{"name": "a", "kind": "directory"}],
         "range": {"start": 0, "end": 1},
+        "truncated": True,
         "has_more": True,
         "next_cursor": 1,
     }

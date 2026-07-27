@@ -33,6 +33,7 @@ class ToolResult:
     content: str
     error_code: str | None
     target: str
+    evidence_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

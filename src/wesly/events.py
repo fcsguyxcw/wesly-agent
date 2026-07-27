@@ -38,6 +38,7 @@ class RunCompleted:
     model_turns: int
     tool_calls: int
     usage: Usage
+    evidence_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -57,6 +57,12 @@ def run_cli(
             print("[done] 运行完成", file=stdout)
             print(file=stdout)
             print(event.answer, file=stdout)
+            if event.evidence_paths:
+                print(file=stdout)
+                print(
+                    "文件证据: " + ", ".join(event.evidence_paths),
+                    file=stdout,
+                )
             print(file=stdout)
             print(
                 f"模型轮次: {event.model_turns} | "

@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 
 from wesly.context import ContextBuilder, DirectAnswerContextBuilder
+from wesly.evidence import extract_file_citations
 from wesly.events import (
     AgentEvent,
     ModelCompleted,
@@ -33,6 +34,7 @@ class Agent:
         history: list[Message] = []
         tool_calls = 0
         usage = Usage(input_tokens=0, output_tokens=0)
+        observed_evidence: set[str] = set()
 
         for turn in range(1, self._max_model_turns + 1):
             yield ModelStarted(turn=turn)
@@ -92,6 +94,7 @@ class Agent:
                     )
                     result = self._tool_registry.execute(call)
                     tool_calls += 1
+                    observed_evidence.update(result.evidence_paths)
                     yield ToolCompleted(
                         call_id=result.call_id,
                         tool_name=result.tool_name,
@@ -116,11 +119,27 @@ class Agent:
                     tool_calls=tool_calls,
                 )
                 return
+            citations = extract_file_citations(model_turn.content)
+            missing_evidence = tuple(
+                path for path in citations if path not in observed_evidence
+            )
+            if missing_evidence:
+                yield RunFailed(
+                    stop_reason="evidence_error",
+                    message=(
+                        "模型引用了本次运行未观察的文件: "
+                        + ", ".join(missing_evidence)
+                    ),
+                    model_turns=turn,
+                    tool_calls=tool_calls,
+                )
+                return
             yield RunCompleted(
                 answer=model_turn.content,
                 model_turns=turn,
                 tool_calls=tool_calls,
                 usage=usage,
+                evidence_paths=citations,
             )
             return
 

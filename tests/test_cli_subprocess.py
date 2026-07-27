@@ -57,3 +57,23 @@ def test_cli_process_shows_a_provider_failure() -> None:
     assert result.returncode == 1
     assert result.stdout == "[model] 正在调用模型\n"
     assert result.stderr == "[error] provider_error: 模型服务暂时不可用\n"
+
+
+def test_cli_process_completes_search_read_and_evidence_flow() -> None:
+    result = run_scripted_cli("search-read")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "[tool] search_text 目标: README.md\n" in result.stdout
+    assert "[tool] read_file 目标: README.md\n" in result.stdout
+    assert "项目说明见 [[README.md]]。\n" in result.stdout
+    assert "文件证据: README.md\n" in result.stdout
+
+
+def test_cli_process_rejects_an_unobserved_file_citation() -> None:
+    result = run_scripted_cli("no-evidence")
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "[error] evidence_error: 模型引用了本次运行未观察的文件: README.md\n"
+    )
