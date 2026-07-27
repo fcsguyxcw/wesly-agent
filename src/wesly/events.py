@@ -59,6 +59,10 @@ class ToolCompleted:
     status: Literal["success", "error"]
     target: str
     error_code: str | None
+    changed_paths: tuple[str, ...] = ()
+    exit_code: int | None = None
+    timed_out: bool | None = None
+    output_truncated: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

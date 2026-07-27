@@ -676,6 +676,7 @@ class ToolRegistry:
         operation: PreparedOperation,
     ) -> ToolResult:
         results: list[dict[str, object]] = []
+        changed_paths: list[str] = []
         try:
             for effect in operation.effects:
                 if not self._file_effect_still_matches(call, effect):
@@ -683,6 +684,7 @@ class ToolRegistry:
                         call,
                         "operation_drift",
                         "文件效果在执行前再次发生漂移；后续效果未执行",
+                        changed_paths=tuple(dict.fromkeys(changed_paths)),
                     )
                 if effect.kind in {"write_text", "write_binary"}:
                     assert effect.content is not None
@@ -691,6 +693,7 @@ class ToolRegistry:
                             call,
                             "operation_drift",
                             "文件效果在原子替换前发生漂移；后续效果未执行",
+                            changed_paths=tuple(dict.fromkeys(changed_paths)),
                         )
                     content_hash = self._hash_file(effect.target)
                     relative = self._relative_path(effect.target)
@@ -703,9 +706,11 @@ class ToolRegistry:
                             "sha256": content_hash,
                         }
                     )
+                    changed_paths.append(self._effect_display_path(effect.target))
                 elif effect.kind == "delete":
                     effect.target.unlink()
                     results.append({"effect": effect.effect, "target": str(effect.target)})
+                    changed_paths.append(self._effect_display_path(effect.target))
                 else:
                     assert effect.destination is not None
                     os.replace(effect.target, effect.destination)
@@ -721,17 +726,29 @@ class ToolRegistry:
                             "sha256": content_hash,
                         }
                     )
+                    changed_paths.extend(
+                        (
+                            self._effect_display_path(effect.target),
+                            self._effect_display_path(effect.destination),
+                        )
+                    )
         except OSError:
             return self._error(
                 call,
                 "operation_failed",
                 "已批准的文件操作执行失败；后续效果未执行",
+                changed_paths=tuple(dict.fromkeys(changed_paths)),
             )
         return self._success(
             call,
             operation.impact_scope,
             {"fingerprint": operation.fingerprint, "effects": results},
+            changed_paths=tuple(dict.fromkeys(changed_paths)),
         )
+
+    def _effect_display_path(self, target: Path) -> str:
+        relative = self._relative_path(target)
+        return str(target) if relative == "<outside-workspace>" else relative
 
     def _file_effect_still_matches(
         self,
@@ -1115,6 +1132,7 @@ class ToolRegistry:
                 "previous_sha256": preview.previous_sha256,
                 "sha256": updated_sha256,
             },
+            changed_paths=(preview.path,),
         )
 
     def _record_observation(
@@ -1354,6 +1372,14 @@ class ToolRegistry:
                 error_code="tool_result_too_large",
                 target="run_command",
             )
+        exit_code = execution.payload.get("exit_code")
+        timed_out = execution.payload.get("timed_out")
+        stdout = execution.payload.get("stdout")
+        stderr = execution.payload.get("stderr")
+        output_truncated = any(
+            isinstance(stream, dict) and stream.get("truncated") is True
+            for stream in (stdout, stderr)
+        )
         return ToolResult(
             call_id=call.id,
             tool_name=call.name,
@@ -1361,6 +1387,9 @@ class ToolRegistry:
             content=content,
             error_code=execution.error_code,
             target="run_command",
+            exit_code=exit_code if isinstance(exit_code, int) else None,
+            timed_out=timed_out if isinstance(timed_out, bool) else None,
+            output_truncated=output_truncated,
         )
 
     @staticmethod
@@ -1410,6 +1439,7 @@ class ToolRegistry:
         target: str,
         payload: Mapping[str, object],
         evidence_paths: tuple[str, ...] = (),
+        changed_paths: tuple[str, ...] = (),
     ) -> ToolResult:
         content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(content.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
@@ -1427,6 +1457,7 @@ class ToolRegistry:
             error_code=None,
             target=target,
             evidence_paths=evidence_paths,
+            changed_paths=changed_paths,
         )
 
     def _error(
@@ -1435,6 +1466,7 @@ class ToolRegistry:
         error_code: str,
         message: str,
         target: str | None = None,
+        changed_paths: tuple[str, ...] = (),
     ) -> ToolResult:
         return ToolResult(
             call_id=call.id,
@@ -1447,4 +1479,5 @@ class ToolRegistry:
             ),
             error_code=error_code,
             target=target or self.describe_target(call),
+            changed_paths=changed_paths,
         )

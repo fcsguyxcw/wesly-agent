@@ -72,7 +72,11 @@ def test_cli_reports_provider_failure_with_a_nonzero_exit() -> None:
 
     assert exit_code == 1
     assert stdout.getvalue() == "[model] 正在调用模型\n"
-    assert stderr.getvalue() == "[error] provider_error: 模型服务暂时不可用\n"
+    assert stderr.getvalue() == (
+        "[error] provider_error: 模型服务暂时不可用\n"
+        "运行统计: 模型轮次 1 | 工具调用 0\n"
+        "建议: 检查模型服务后重试\n"
+    )
 
 
 def test_cli_returns_130_for_keyboard_interrupt() -> None:
@@ -88,7 +92,11 @@ def test_cli_returns_130_for_keyboard_interrupt() -> None:
 
     assert exit_code == 130
     assert stdout.getvalue() == "[model] 正在调用模型\n"
-    assert stderr.getvalue() == "[error] interrupted: 任务已由用户中断\n"
+    assert stderr.getvalue() == (
+        "[error] interrupted: 任务已由用户中断\n"
+        "运行统计: 模型轮次 0 | 工具调用 0\n"
+        "建议: 检查当前工作区状态后再决定是否重试\n"
+    )
 
 
 def test_cli_returns_130_when_context_creation_is_interrupted(
@@ -454,4 +462,8 @@ def test_cli_interrupt_during_approval_is_safe(
 
     assert exit_code == 130
     assert not (tmp_path / "result.txt").exists()
-    assert stderr.getvalue() == "[error] interrupted: 任务已由用户中断\n"
+    assert stderr.getvalue() == (
+        "[error] interrupted: 任务已由用户中断\n"
+        "运行统计: 模型轮次 1 | 工具调用 0\n"
+        "建议: 检查当前工作区状态后再决定是否重试\n"
+    )

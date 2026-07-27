@@ -34,6 +34,10 @@ class ToolResult:
     error_code: str | None
     target: str
     evidence_paths: tuple[str, ...] = ()
+    changed_paths: tuple[str, ...] = ()
+    exit_code: int | None = None
+    timed_out: bool | None = None
+    output_truncated: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

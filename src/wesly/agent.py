@@ -232,6 +232,10 @@ class Agent:
                         status=result.status,
                         target=result.target,
                         error_code=result.error_code,
+                        changed_paths=result.changed_paths,
+                        exit_code=result.exit_code,
+                        timed_out=result.timed_out,
+                        output_truncated=result.output_truncated,
                     )
                     history.append(
                         Message(

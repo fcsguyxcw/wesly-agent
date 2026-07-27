@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from wesly.model import ToolCall
-from wesly.permissions import PreparedOperation
+from wesly.permissions import NormalizedFileEffect, PreparedOperation
 from wesly.tools import ToolRegistry
 
 
@@ -156,6 +156,39 @@ def test_batch_modification_requires_one_approval_for_exact_batch(tmp_path: Path
     )
 
     assert prepared.impact_scope == "2 file effects: overwrite_text, overwrite_text"
+
+
+def test_partial_batch_failure_reports_only_effects_that_already_happened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("old-1", encoding="utf-8")
+    second.write_text("old-2", encoding="utf-8")
+    registry = ToolRegistry(tmp_path)
+    call = operation_call(
+        {"kind": "write_text", "path": "first.txt", "content": "new-1"},
+        {"kind": "write_text", "path": "second.txt", "content": "new-2"},
+    )
+    approved = registry.prepare_operation(call)
+    assert isinstance(approved, PreparedOperation)
+    original_write = registry._atomic_write_bytes
+    calls = 0
+
+    def fail_second_write(call: ToolCall, effect: NormalizedFileEffect) -> bool:
+        nonlocal calls
+        calls += 1
+        return False if calls == 2 else original_write(call, effect)
+
+    monkeypatch.setattr(registry, "_atomic_write_bytes", fail_second_write)
+
+    result = registry.execute(call, approved_operation=approved)
+
+    assert result.error_code == "operation_drift"
+    assert result.changed_paths == ("first.txt",)
+    assert first.read_text(encoding="utf-8") == "new-1"
+    assert second.read_text(encoding="utf-8") == "old-2"
 
 
 def test_binary_write_requires_approval(tmp_path: Path) -> None:
