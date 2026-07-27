@@ -224,7 +224,10 @@ class CommandRunner:
                 )
             except KeyboardInterrupt:
                 try:
-                    tree.terminate()
+                    try:
+                        tree.terminate()
+                    except ProcessTreeError:
+                        pass
                 finally:
                     tree.close()
                     process.communicate()

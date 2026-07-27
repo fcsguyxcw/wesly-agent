@@ -22,6 +22,6 @@
 - stdout 与 stderr 分别最多返回 12 KiB，并携带 `total_bytes`、`returned_bytes` 和 `truncated`；敏感环境值在审批展示和命令输出中替换为 `[REDACTED]`，完整工具结果保持在 32 KiB 内。
 - 组件测试覆盖允许、拒绝、审批重放、参数/工作目录/环境漂移、启动失败、非零退出、超时、中断、截断、脱敏和 PowerShell 原文；Agent 测试证明两次命令产生两次审批，CLI 测试通过真实受控 Python 命令证明批准后仅执行一次。
 - Windows 命令以挂起状态启动，先加入启用 `KILL_ON_JOB_CLOSE` 的 Job Object，再恢复主线程；超时和中断使用 `TerminateJobObject` 清理完整派生树。POSIX 命令使用新 session，并通过 `killpg` 清理完整进程组。
-- Job 创建、绑定或恢复失败时，挂起进程会被直接终止且返回 `command_start_failed`；树级终止调用失败时不再声称普通超时，而返回 `command_termination_failed`。
+- Job 创建、绑定或恢复失败时，挂起进程会被直接终止且返回 `command_start_failed`；超时清理的树级终止调用失败时不再声称普通超时，而返回 `command_termination_failed`。
 - 真实父子进程回归测试关闭继承管道后延迟写入副作用文件，证明超时和中断返回后孙进程不会继续运行；另有测试证明 Job 绑定失败时命令主体从未执行。
 - 完整测试为 `109 passed, 4 skipped`，严格 mypy 检查通过。
