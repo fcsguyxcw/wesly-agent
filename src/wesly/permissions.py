@@ -6,6 +6,12 @@ from typing import Literal, Protocol
 
 
 ApprovalDecision = Literal["allow_once", "deny"]
+ApprovalDecisionReason = Literal[
+    "user",
+    "timeout",
+    "interrupted",
+    "approval_error",
+]
 FileEffectKind = Literal["write_text", "write_binary", "delete", "move"]
 Sensitivity = Literal[
     "normal",
@@ -18,7 +24,9 @@ Sensitivity = Literal[
 @dataclass(frozen=True, slots=True)
 class NormalizedFileEffect:
     kind: FileEffectKind
+    requested_path: str
     target: Path
+    requested_destination: str | None
     destination: Path | None
     content: bytes | None
     effect: str
@@ -43,3 +51,7 @@ class PreparedOperation:
 
 class ApprovalProvider(Protocol):
     def decide(self, operation: PreparedOperation) -> ApprovalDecision: ...
+
+
+class ApprovalTimedOutError(Exception):
+    """The approval provider did not receive a decision before its deadline."""

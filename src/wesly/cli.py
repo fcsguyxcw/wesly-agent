@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
@@ -22,7 +23,7 @@ from wesly.events import (
     ToolStarted,
 )
 from wesly.model import ModelClient
-from wesly.permissions import ApprovalDecision, PreparedOperation
+from wesly.permissions import ApprovalDecision, ApprovalTimedOutError, PreparedOperation
 from wesly.tools import ToolRegistry
 
 
@@ -49,7 +50,7 @@ def run_cli(
         model_client,
         context_builder=context_builder,
         tool_registry=ToolRegistry(workspace),
-        approval_provider=_TerminalApprovalProvider(stdin or sys.stdin),
+        approval_provider=_TerminalApprovalProvider(stdin or sys.stdin, stdout),
     )
     try:
         for event in agent.run(task):
@@ -97,7 +98,16 @@ def run_cli(
                 print(f"操作指纹: {_safe_prompt_text(event.fingerprint)}", file=stdout)
                 print("选择 [y] 本次允许；其他输入拒绝:", file=stdout, flush=True)
             elif isinstance(event, ApprovalDecided):
-                label = "本次允许" if event.decision == "allow_once" else "拒绝"
+                if event.decision == "allow_once":
+                    label = "本次允许"
+                elif event.reason == "timeout":
+                    label = "审批超时，已拒绝"
+                elif event.reason == "approval_error":
+                    label = "审批服务异常，已拒绝"
+                elif event.reason == "interrupted":
+                    label = "审批中断，已拒绝"
+                else:
+                    label = "拒绝"
                 print(f"[approval] {label}", file=stdout)
             elif isinstance(event, ToolCompleted):
                 label = "ok" if event.status == "success" else "error"
@@ -189,16 +199,53 @@ def _safe_prompt_text(value: str) -> str:
 
 
 class _TerminalApprovalProvider:
-    def __init__(self, stdin: TextIO) -> None:
+    def __init__(
+        self,
+        stdin: TextIO,
+        stdout: TextIO,
+        timeout_seconds: float = 120.0,
+    ) -> None:
         self._stdin = stdin
+        self._stdout = stdout
+        self._timeout_seconds = timeout_seconds
 
     def decide(self, operation: PreparedOperation) -> ApprovalDecision:
         del operation
         try:
-            answer = self._stdin.readline().strip().casefold()
+            if os.name == "nt" and self._stdin is sys.stdin and self._stdin.isatty():
+                answer = self._read_windows_console()
+            else:
+                answer = self._stdin.readline()
         except OSError:
             return "deny"
+        answer = answer.strip().casefold()
         return "allow_once" if answer in {"y", "yes", "allow", "允许"} else "deny"
+
+    def _read_windows_console(self) -> str:
+        import msvcrt
+
+        deadline = time.monotonic() + self._timeout_seconds
+        characters: list[str] = []
+        while time.monotonic() < deadline:
+            if not msvcrt.kbhit():
+                time.sleep(0.05)
+                continue
+            character = msvcrt.getwch()
+            if character == "\x03":
+                raise KeyboardInterrupt
+            if character in {"\r", "\n"}:
+                print(file=self._stdout, flush=True)
+                return "".join(characters)
+            if character == "\b":
+                if characters:
+                    characters.pop()
+                    print("\b \b", end="", file=self._stdout, flush=True)
+                continue
+            if character.isprintable():
+                characters.append(character)
+                print(character, end="", file=self._stdout, flush=True)
+        print(file=self._stdout, flush=True)
+        raise ApprovalTimedOutError
 
 
 def _redact_secrets(value: str) -> str:

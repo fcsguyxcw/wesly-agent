@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wesly.model import Usage
-from wesly.permissions import ApprovalDecision, Sensitivity
+from wesly.permissions import ApprovalDecision, ApprovalDecisionReason, Sensitivity
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +49,7 @@ class ApprovalDecided:
     call_id: str
     fingerprint: str
     decision: ApprovalDecision
+    reason: ApprovalDecisionReason
 
 
 @dataclass(frozen=True, slots=True)

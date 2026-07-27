@@ -265,6 +265,10 @@ class ToolRegistry:
         self._pending_approvals[prepared.fingerprint] = prepared
         return prepared
 
+    def revoke_operation(self, operation: PreparedOperation) -> None:
+        if self._pending_approvals.get(operation.fingerprint) is operation:
+            self._pending_approvals.pop(operation.fingerprint)
+
     def execute(
         self,
         call: ToolCall,
@@ -328,14 +332,51 @@ class ToolRegistry:
                     "permission_denied",
                     "批准与当前规范化操作不匹配",
                 )
+            revalidated = self._revalidate_approved_operation(
+                call,
+                arguments,
+                approved_operation,
+            )
+            if isinstance(revalidated, ToolResult):
+                return revalidated
             self._pending_approvals.pop(approved_operation.fingerprint)
-            return self._execute_file_operations(call, approved_operation)
+            return self._execute_file_operations(call, revalidated)
 
         if call.name == "list_workspace":
             return self._list_workspace(call, arguments)
         if call.name == "search_text":
             return self._search_text(call, arguments)
         return self._read_file(call, arguments)
+
+    def _revalidate_approved_operation(
+        self,
+        call: ToolCall,
+        arguments: dict[str, Any],
+        approved_operation: PreparedOperation,
+    ) -> PreparedOperation | ToolResult:
+        try:
+            current = self._prepare_file_operations(call, arguments)
+        except Exception:
+            self._pending_approvals.pop(approved_operation.fingerprint, None)
+            return self._error(
+                call,
+                "permission_denied",
+                "执行前权限策略异常；操作未执行",
+            )
+        if (
+            not isinstance(current, PreparedOperation)
+            or current.fingerprint != approved_operation.fingerprint
+            or current.resolved_targets != approved_operation.resolved_targets
+            or current.sensitivity != approved_operation.sensitivity
+            or current.effects != approved_operation.effects
+        ):
+            self._pending_approvals.pop(approved_operation.fingerprint, None)
+            return self._error(
+                call,
+                "operation_drift",
+                "批准后的路径、类型、哈希、作用域或效果已变化；请重新调查并审批",
+            )
+        return current
 
     def _prepare_file_operations(
         self,
@@ -529,7 +570,11 @@ class ToolRegistry:
 
         return NormalizedFileEffect(
             kind=kind,
+            requested_path=requested_path,
             target=target,
+            requested_destination=(
+                requested_destination if kind == "move" else None
+            ),
             destination=destination,
             content=content,
             effect=effect,
@@ -584,9 +629,20 @@ class ToolRegistry:
         results: list[dict[str, object]] = []
         try:
             for effect in operation.effects:
+                if not self._file_effect_still_matches(call, effect):
+                    return self._error(
+                        call,
+                        "operation_drift",
+                        "文件效果在执行前再次发生漂移；后续效果未执行",
+                    )
                 if effect.kind in {"write_text", "write_binary"}:
                     assert effect.content is not None
-                    self._atomic_write_bytes(effect.target, effect.content)
+                    if not self._atomic_write_bytes(call, effect):
+                        return self._error(
+                            call,
+                            "operation_drift",
+                            "文件效果在原子替换前发生漂移；后续效果未执行",
+                        )
                     content_hash = self._hash_file(effect.target)
                     relative = self._relative_path(effect.target)
                     if relative != "<outside-workspace>":
@@ -628,8 +684,34 @@ class ToolRegistry:
             {"fingerprint": operation.fingerprint, "effects": results},
         )
 
-    @staticmethod
-    def _atomic_write_bytes(target: Path, content: bytes) -> None:
+    def _file_effect_still_matches(
+        self,
+        call: ToolCall,
+        effect: NormalizedFileEffect,
+    ) -> bool:
+        raw: dict[str, object] = {
+            "kind": effect.kind,
+            "path": effect.requested_path,
+        }
+        if effect.kind == "write_text":
+            assert effect.content is not None
+            raw["content"] = effect.content.decode("utf-8")
+        elif effect.kind == "write_binary":
+            assert effect.content is not None
+            raw["content_base64"] = base64.b64encode(effect.content).decode("ascii")
+        elif effect.kind == "move":
+            assert effect.requested_destination is not None
+            raw["destination"] = effect.requested_destination
+        current = self._normalize_file_effect(call, raw)
+        return isinstance(current, NormalizedFileEffect) and current == effect
+
+    def _atomic_write_bytes(
+        self,
+        call: ToolCall,
+        effect: NormalizedFileEffect,
+    ) -> bool:
+        assert effect.content is not None
+        target = effect.target
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -638,14 +720,17 @@ class ToolRegistry:
                 prefix=".wesly-effect-",
                 delete=False,
             ) as temporary:
-                temporary.write(content)
+                temporary.write(effect.content)
                 temporary.flush()
                 os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             if target.exists():
                 os.chmod(temporary_path, target.stat().st_mode)
+            if not self._file_effect_still_matches(call, effect):
+                return False
             os.replace(temporary_path, target)
             temporary_path = None
+            return True
         finally:
             if temporary_path is not None:
                 try:

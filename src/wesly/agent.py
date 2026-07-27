@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from wesly.context import (
     ContextBuilder,
@@ -19,7 +19,11 @@ from wesly.events import (
     ToolStarted,
 )
 from wesly.model import Message, ModelClient, ModelProviderError, Usage
-from wesly.permissions import ApprovalProvider
+from wesly.permissions import (
+    ApprovalDecisionReason,
+    ApprovalProvider,
+    ApprovalTimedOutError,
+)
 from wesly.tools import ToolRegistry
 
 
@@ -30,6 +34,8 @@ class Agent:
         context_builder: ContextBuilder | None = None,
         tool_registry: ToolRegistry | None = None,
         approval_provider: ApprovalProvider | None = None,
+        approval_audit: Callable[[ApprovalRequested | ApprovalDecided], None]
+        | None = None,
         max_model_turns: int = 12,
         max_tool_calls: int = 30,
     ) -> None:
@@ -37,6 +43,7 @@ class Agent:
         self._context_builder = context_builder or DirectAnswerContextBuilder()
         self._tool_registry = tool_registry
         self._approval_provider = approval_provider
+        self._approval_audit = approval_audit
         self._max_model_turns = max_model_turns
         self._max_tool_calls = max_tool_calls
 
@@ -126,10 +133,19 @@ class Agent:
                                 path=preview.path,
                                 diff=preview.diff,
                             )
-                        prepared_operation = self._tool_registry.prepare_operation(call)
+                        try:
+                            prepared_operation = self._tool_registry.prepare_operation(call)
+                        except Exception:
+                            yield RunFailed(
+                                stop_reason="permission_error",
+                                message="权限策略评估失败；操作未执行",
+                                model_turns=turn,
+                                tool_calls=tool_calls,
+                            )
+                            return
                         approved_operation = None
                         if prepared_operation is not None:
-                            yield ApprovalRequested(
+                            requested_event = ApprovalRequested(
                                 call_id=call.id,
                                 fingerprint=prepared_operation.fingerprint,
                                 operation=prepared_operation.operation,
@@ -140,16 +156,59 @@ class Agent:
                                 workspace=prepared_operation.workspace,
                                 sensitivity=prepared_operation.sensitivity,
                             )
-                            decision = (
-                                self._approval_provider.decide(prepared_operation)
-                                if self._approval_provider is not None
-                                else "deny"
-                            )
-                            yield ApprovalDecided(
+                            if not self._record_approval_event(requested_event):
+                                self._tool_registry.revoke_operation(prepared_operation)
+                                yield RunFailed(
+                                    stop_reason="permission_error",
+                                    message="审批审计失败；操作未执行",
+                                    model_turns=turn,
+                                    tool_calls=tool_calls,
+                                )
+                                return
+                            yield requested_event
+                            decision_reason: ApprovalDecisionReason = "user"
+                            interrupted = False
+                            try:
+                                decision = (
+                                    self._approval_provider.decide(prepared_operation)
+                                    if self._approval_provider is not None
+                                    else "deny"
+                                )
+                            except ApprovalTimedOutError:
+                                decision = "deny"
+                                decision_reason = "timeout"
+                            except KeyboardInterrupt:
+                                decision = "deny"
+                                decision_reason = "interrupted"
+                                interrupted = True
+                            except Exception:
+                                decision = "deny"
+                                decision_reason = "approval_error"
+                            decided_event = ApprovalDecided(
                                 call_id=call.id,
                                 fingerprint=prepared_operation.fingerprint,
                                 decision=decision,
+                                reason=decision_reason,
                             )
+                            if not self._record_approval_event(decided_event):
+                                self._tool_registry.revoke_operation(prepared_operation)
+                                yield RunFailed(
+                                    stop_reason="permission_error",
+                                    message="审批审计失败；操作未执行",
+                                    model_turns=turn,
+                                    tool_calls=tool_calls,
+                                )
+                                return
+                            yield decided_event
+                            if interrupted:
+                                self._tool_registry.revoke_operation(prepared_operation)
+                                yield RunFailed(
+                                    stop_reason="interrupted",
+                                    message="任务已由用户中断",
+                                    model_turns=turn,
+                                    tool_calls=tool_calls,
+                                )
+                                return
                             if decision == "allow_once":
                                 approved_operation = prepared_operation
                         result = self._tool_registry.execute(
@@ -221,3 +280,15 @@ class Agent:
             model_turns=self._max_model_turns,
             tool_calls=tool_calls,
         )
+
+    def _record_approval_event(
+        self,
+        event: ApprovalRequested | ApprovalDecided,
+    ) -> bool:
+        if self._approval_audit is None:
+            return True
+        try:
+            self._approval_audit(event)
+        except Exception:
+            return False
+        return True
