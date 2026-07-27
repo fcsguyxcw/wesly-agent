@@ -1,14 +1,17 @@
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 import wesly.commands
+import wesly.process_tree
 from wesly.model import ToolCall
 from wesly.permissions import PreparedOperation
+from wesly.process_tree import ProcessTree, ProcessTreeError
 from wesly.tools import ToolRegistry
 
 
@@ -137,6 +140,29 @@ def test_command_result_distinguishes_timeout_and_kills_process(tmp_path: Path) 
     assert "started" in cast(dict[str, object], data["stdout"])["text"]
 
 
+def test_command_timeout_terminates_descendant_processes(tmp_path: Path) -> None:
+    child_source = (
+        "import time; from pathlib import Path; "
+        "Path('child-ready.txt').write_text('ready'); time.sleep(2); "
+        "Path('escaped-side-effect.txt').write_text('escaped')"
+    )
+    parent_source = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child_source!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "time.sleep(30)"
+    )
+    registry = ToolRegistry(tmp_path)
+    call = command_call(args=["-c", parent_source], timeout_seconds=1)
+
+    result = registry.execute(call, approved_operation=prepare(registry, call))
+
+    assert result.error_code == "command_timeout"
+    assert (tmp_path / "child-ready.txt").exists()
+    time.sleep(2.2)
+    assert not (tmp_path / "escaped-side-effect.txt").exists()
+
+
 def test_command_start_failure_is_structured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,38 +182,113 @@ def test_command_start_failure_is_structured(
     assert "simulated start failure" not in result.content
 
 
+def test_windows_job_assignment_failure_has_no_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows Job Object specific regression")
+
+    def fail_assignment(job_handle: int, process_id: int) -> None:
+        del job_handle, process_id
+        raise ProcessTreeError("simulated assignment failure")
+
+    monkeypatch.setattr(
+        wesly.process_tree,
+        "_assign_process_to_windows_job",
+        fail_assignment,
+    )
+    registry = ToolRegistry(tmp_path)
+    call = command_call(
+        args=["-c", "from pathlib import Path; Path('must-not-exist.txt').write_text('x')"]
+    )
+
+    result = registry.execute(call, approved_operation=prepare(registry, call))
+
+    assert result.error_code == "command_start_failed"
+    assert not (tmp_path / "must-not-exist.txt").exists()
+
+
+def test_command_reports_tree_termination_failure_without_claiming_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_spawn = wesly.commands.spawn_process_tree
+
+    class FailingTerminationTree:
+        def __init__(self, tree: ProcessTree) -> None:
+            self.process = tree.process
+            self._tree = tree
+
+        def terminate(self) -> None:
+            raise ProcessTreeError("simulated tree termination failure")
+
+        def close(self) -> None:
+            self._tree.close()
+
+    def spawn_with_failed_termination(*args: object, **kwargs: object) -> FailingTerminationTree:
+        return FailingTerminationTree(original_spawn(*args, **kwargs))
+
+    monkeypatch.setattr(wesly.commands, "spawn_process_tree", spawn_with_failed_termination)
+    registry = ToolRegistry(tmp_path)
+    call = command_call(args=["-c", "import time; time.sleep(30)"], timeout_seconds=1)
+
+    result = registry.execute(call, approved_operation=prepare(registry, call))
+
+    assert result.status == "error"
+    assert result.error_code == "command_termination_failed"
+    assert payload(result.content)["error_code"] == "command_termination_failed"
+
+
 def test_command_interrupt_kills_process_and_remains_distinguishable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class InterruptingProcess:
-        returncode = None
-
-        def __init__(self) -> None:
-            self.killed = False
-            self.communicate_calls = 0
-
-        def communicate(self, timeout: int | None = None) -> tuple[bytes, bytes]:
-            del timeout
-            self.communicate_calls += 1
-            if self.communicate_calls == 1:
-                raise KeyboardInterrupt
-            return b"", b""
-
-        def kill(self) -> None:
-            self.killed = True
-
-    process = InterruptingProcess()
+    child_source = (
+        "import time; from pathlib import Path; "
+        "Path('interrupt-child-ready.txt').write_text('ready'); time.sleep(2); "
+        "Path('interrupt-escaped.txt').write_text('escaped')"
+    )
+    parent_source = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child_source!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "time.sleep(30)"
+    )
     registry = ToolRegistry(tmp_path)
-    call = command_call(args=["-c", "pass"])
+    call = command_call(args=["-c", parent_source])
     approved = prepare(registry, call)
-    monkeypatch.setattr(wesly.commands.subprocess, "Popen", lambda *args, **kwargs: process)
+    original_communicate = wesly.commands.subprocess.Popen.communicate
+    first_call = True
+
+    def interrupt_after_child_starts(
+        process: wesly.commands.subprocess.Popen[bytes],
+        input: bytes | None = None,
+        timeout: float | None = None,
+    ) -> tuple[bytes, bytes]:
+        nonlocal first_call
+        if first_call:
+            first_call = False
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if (tmp_path / "interrupt-child-ready.txt").exists():
+                    raise KeyboardInterrupt
+                time.sleep(0.02)
+            raise AssertionError("descendant process did not start")
+        return original_communicate(process, input=input, timeout=timeout)
+
+    monkeypatch.setattr(
+        wesly.commands.subprocess.Popen,
+        "communicate",
+        interrupt_after_child_starts,
+    )
 
     with pytest.raises(KeyboardInterrupt):
         registry.execute(call, approved_operation=approved)
 
-    assert process.killed is True
-    assert process.communicate_calls == 2
+    assert (tmp_path / "interrupt-child-ready.txt").exists()
+    time.sleep(2.2)
+    assert not (tmp_path / "interrupt-escaped.txt").exists()
     assert registry.execute(call, approved_operation=approved).error_code == "permission_denied"
 
 

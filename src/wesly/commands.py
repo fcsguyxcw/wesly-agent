@@ -11,6 +11,7 @@ from typing import Any, Literal, Mapping
 
 from wesly.model import ToolCall
 from wesly.permissions import NormalizedCommand, PreparedOperation
+from wesly.process_tree import ProcessTreeError, spawn_process_tree
 
 
 MAX_COMMAND_OUTPUT_BYTES = 12 * 1024
@@ -168,40 +169,68 @@ class CommandRunner:
             if value and any(fragment in key.upper() for fragment in SENSITIVE_ENV_FRAGMENTS)
         )
         try:
-            process = subprocess.Popen(
+            tree = spawn_process_tree(
                 command.argv,
                 cwd=command.cwd,
                 env=process_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
             )
-        except OSError:
+        except ProcessTreeError:
             return CommandExecution(
                 "error",
                 "command_start_failed",
                 {"error": "命令进程启动失败", "error_code": "command_start_failed"},
             )
 
+        process = tree.process
         try:
-            stdout, stderr = process.communicate(timeout=command.timeout_seconds)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            timeout_payload = dict(
-                self._payload(stdout, stderr, process.returncode, redacted_values, timed_out=True)
-            )
-            timeout_payload["error_code"] = "command_timeout"
-            return CommandExecution(
-                "error",
-                "command_timeout",
-                timeout_payload,
-            )
-        except KeyboardInterrupt:
-            process.kill()
-            process.communicate()
-            raise
+            try:
+                stdout, stderr = process.communicate(timeout=command.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                try:
+                    tree.terminate()
+                except ProcessTreeError:
+                    tree.close()
+                    stdout, stderr = process.communicate()
+                    failed_payload = dict(
+                        self._payload(
+                            stdout,
+                            stderr,
+                            process.returncode,
+                            redacted_values,
+                            timed_out=True,
+                        )
+                    )
+                    failed_payload["error_code"] = "command_termination_failed"
+                    return CommandExecution(
+                        "error",
+                        "command_termination_failed",
+                        failed_payload,
+                    )
+                stdout, stderr = process.communicate()
+                timeout_payload = dict(
+                    self._payload(
+                        stdout,
+                        stderr,
+                        process.returncode,
+                        redacted_values,
+                        timed_out=True,
+                    )
+                )
+                timeout_payload["error_code"] = "command_timeout"
+                return CommandExecution(
+                    "error",
+                    "command_timeout",
+                    timeout_payload,
+                )
+            except KeyboardInterrupt:
+                try:
+                    tree.terminate()
+                finally:
+                    tree.close()
+                    process.communicate()
+                raise
+        finally:
+            tree.close()
 
         payload = self._payload(
             stdout,
