@@ -24,6 +24,13 @@ class ToolStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class FileDiffProposed:
+    call_id: str
+    path: str
+    diff: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCompleted:
     call_id: str
     tool_name: str
@@ -53,6 +60,7 @@ AgentEvent = (
     ModelStarted
     | ModelCompleted
     | ToolStarted
+    | FileDiffProposed
     | ToolCompleted
     | RunCompleted
     | RunFailed

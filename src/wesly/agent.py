@@ -8,6 +8,7 @@ from wesly.context import (
 from wesly.evidence import extract_file_citations
 from wesly.events import (
     AgentEvent,
+    FileDiffProposed,
     ModelCompleted,
     ModelStarted,
     RunCompleted,
@@ -113,7 +114,14 @@ class Agent:
                         target=target,
                     )
                     try:
-                        result = self._tool_registry.execute(call)
+                        preview = self._tool_registry.preview(call)
+                        if preview is not None:
+                            yield FileDiffProposed(
+                                call_id=call.id,
+                                path=preview.path,
+                                diff=preview.diff,
+                            )
+                        result = self._tool_registry.execute(call, preview=preview)
                     except KeyboardInterrupt:
                         yield RunFailed(
                             stop_reason="interrupted",

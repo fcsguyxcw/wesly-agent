@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -51,7 +52,8 @@ def test_search_text_returns_explicit_pages_from_real_files(tmp_path: Path) -> N
 
 
 def test_read_file_returns_line_ranges_and_next_cursor(tmp_path: Path) -> None:
-    (tmp_path / "sample.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    target = tmp_path / "sample.py"
+    target.write_text("one\ntwo\nthree\n", encoding="utf-8")
     registry = ToolRegistry(tmp_path)
 
     page = execute(
@@ -62,6 +64,7 @@ def test_read_file_returns_line_ranges_and_next_cursor(tmp_path: Path) -> None:
 
     assert page == {
         "path": "sample.py",
+        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
         "lines": [{"number": 2, "text": "two"}],
         "range": {"start": 1, "end": 2},
         "total_lines": 3,
@@ -85,18 +88,14 @@ def test_read_file_reports_missing_decode_and_read_failures(
     undecodable = registry.execute(
         ToolCall("decode", "read_file", '{"path":"bad.bin"}')
     )
-    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
 
-    def fail_blocked(
-        path: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
+    def fail_blocked(path: Path) -> bytes:
         if path == blocked:
             raise PermissionError("blocked")
-        return original_read_text(path, encoding=encoding, errors=errors)
+        return original_read_bytes(path)
 
-    monkeypatch.setattr(Path, "read_text", fail_blocked)
+    monkeypatch.setattr(Path, "read_bytes", fail_blocked)
     unreadable = registry.execute(
         ToolCall("read", "read_file", '{"path":"blocked.txt"}')
     )

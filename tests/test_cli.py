@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+import hashlib
 from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
@@ -265,3 +266,60 @@ def test_cli_escapes_model_controlled_activity_text() -> None:
     assert exit_code == 0
     assert "[tool] unknown\\ntool 目标: bad\\npath\n" in stdout.getvalue()
     assert "[error] unknown\\ntool error\n" in stdout.getvalue()
+
+
+def test_cli_shows_file_diff_before_applying_patch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sample.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    old_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+    monkeypatch.chdir(tmp_path)
+    stdout = StringIO()
+    client = ScriptedModelClient(
+        [
+            ModelTurn(
+                content=None,
+                tool_calls=(ToolCall("read", "read_file", '{"path":"sample.py"}'),),
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=4, output_tokens=2),
+            ),
+            ModelTurn(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        "patch",
+                        "apply_patch",
+                        (
+                            '{"path":"sample.py","expected_sha256":"'
+                            + old_hash
+                            + '","old_text":"value = 1","new_text":"value = 2"}'
+                        ),
+                    ),
+                ),
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=8, output_tokens=3),
+            ),
+            ModelTurn(
+                content="修改完成。",
+                tool_calls=(),
+                finish_reason="stop",
+                usage=Usage(input_tokens=10, output_tokens=2),
+            ),
+        ]
+    )
+
+    exit_code = run_cli(
+        ["把 value 改成 2"],
+        model_client=client,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+    assert "[diff] sample.py\n" in output
+    assert "--- a/sample.py\n+++ b/sample.py\n" in output
+    assert output.index("[diff] sample.py") < output.index("[ok] apply_patch success")

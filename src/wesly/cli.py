@@ -11,6 +11,7 @@ from wesly.agent import Agent
 from wesly.context import InstructionLoadError, ReadOnlyContextBuilder
 from wesly.deepseek import create_deepseek_adapter
 from wesly.events import (
+    FileDiffProposed,
     ModelCompleted,
     ModelStarted,
     RunCompleted,
@@ -71,6 +72,10 @@ def run_cli(
                         f"[detail] tool_call_id={_safe_activity_text(event.call_id)}",
                         file=stdout,
                     )
+            elif isinstance(event, FileDiffProposed):
+                print(f"[diff] {_safe_activity_text(event.path)}", file=stdout)
+                safe_diff = _safe_diff_text(event.diff)
+                print(safe_diff, end="" if safe_diff.endswith("\n") else "\n", file=stdout)
             elif isinstance(event, ToolCompleted):
                 label = "ok" if event.status == "success" else "error"
                 print(
@@ -145,6 +150,15 @@ def _configure_standard_streams() -> None:
 
 def _safe_activity_text(value: str) -> str:
     return value.encode("unicode_escape").decode("ascii")
+
+
+def _safe_diff_text(value: str) -> str:
+    return "".join(
+        character
+        if character in "\n\r\t" or character.isprintable()
+        else character.encode("unicode_escape").decode("ascii")
+        for character in value
+    )
 
 
 def _redact_secrets(value: str) -> str:

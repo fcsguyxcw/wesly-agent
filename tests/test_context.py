@@ -33,7 +33,7 @@ def test_direct_answer_builder_uses_the_stable_model_request() -> None:
     )
 
 
-def test_read_only_context_exposes_the_three_tools_and_citation_contract(
+def test_workspace_context_exposes_read_and_patch_contracts(
     tmp_path: Path,
 ) -> None:
     request = ReadOnlyContextBuilder(tmp_path).build("检查入口")
@@ -42,8 +42,12 @@ def test_read_only_context_exposes_the_three_tools_and_citation_contract(
         cast(Mapping[str, object], tool["function"]) for tool in request.tools
     ]
     tool_names = [definition["name"] for definition in function_definitions]
-    assert tool_names == ["list_workspace", "search_text", "read_file"]
-    assert all("next_cursor" in str(definition["description"]) for definition in function_definitions)
+    assert tool_names == ["list_workspace", "search_text", "read_file", "apply_patch"]
+    assert all(
+        "next_cursor" in str(definition["description"])
+        for definition in function_definitions[:3]
+    )
+    assert "latest sha256" in str(function_definitions[3]["description"])
     assert "actual observed workspace-relative path" in request.instructions[0]
     assert "[[" not in request.instructions[0]
     assert "continue with its next_cursor" in request.instructions[0]
