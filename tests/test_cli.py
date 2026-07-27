@@ -323,3 +323,84 @@ def test_cli_shows_file_diff_before_applying_patch(
     assert "[diff] sample.py\n" in output
     assert "--- a/sample.py\n+++ b/sample.py\n" in output
     assert output.index("[diff] sample.py") < output.index("[ok] apply_patch success")
+
+
+def test_cli_shows_normalized_approval_and_denial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    stdout = StringIO()
+    call = ToolCall(
+        "effects",
+        "apply_file_operations",
+        (
+            '{"reason":"create result","operations":['
+            '{"kind":"write_text","path":"result.txt","content":"secret body"}]}'
+        ),
+    )
+    client = ScriptedModelClient(
+        [
+            ModelTurn(None, (call,), "tool_calls", Usage(5, 2)),
+            ModelTurn("已尊重拒绝。", (), "stop", Usage(7, 3)),
+        ]
+    )
+
+    exit_code = run_cli(
+        ["创建结果"],
+        model_client=client,
+        stdin=StringIO("n\n"),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert not (tmp_path / "result.txt").exists()
+    assert "[approval] 高风险文件操作需要本次批准\n" in output
+    assert "操作: apply_file_operations\n" in output
+    assert "参数: " in output and "content_sha256" in output
+    assert "secret body" not in output
+    assert "解析目标: " in output and "result.txt" in output
+    assert "原因: create result\n" in output
+    assert "影响范围: 1 file effect: create_text\n" in output
+    assert "敏感性: normal\n" in output
+    assert "工作区: " in output
+    assert "操作指纹: " in output
+    assert "[approval] 拒绝\n" in output
+    assert "[error] apply_file_operations error\n" in output
+
+
+def test_cli_interrupt_during_approval_is_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptingInput(StringIO):
+        def readline(self, size: int = -1) -> str:
+            raise KeyboardInterrupt
+
+    monkeypatch.chdir(tmp_path)
+    call = ToolCall(
+        "effects",
+        "apply_file_operations",
+        (
+            '{"reason":"create result","operations":['
+            '{"kind":"write_text","path":"result.txt","content":"done"}]}'
+        ),
+    )
+    client = ScriptedModelClient(
+        [ModelTurn(None, (call,), "tool_calls", Usage(5, 2))]
+    )
+    stderr = StringIO()
+
+    exit_code = run_cli(
+        ["创建结果"],
+        model_client=client,
+        stdin=InterruptingInput(),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 130
+    assert not (tmp_path / "result.txt").exists()
+    assert stderr.getvalue() == "[error] interrupted: 任务已由用户中断\n"

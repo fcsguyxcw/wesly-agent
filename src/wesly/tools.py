@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -8,14 +10,23 @@ import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from wesly.model import ToolCall, ToolResult
+from wesly.permissions import (
+    FileEffectKind,
+    NormalizedFileEffect,
+    PreparedOperation,
+    Sensitivity,
+)
 
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 MAX_EDIT_FILE_BYTES = 1024 * 1024
 MAX_PATCH_FRAGMENT_BYTES = 32 * 1024
+MAX_HIGH_RISK_CONTENT_BYTES = 1024 * 1024
+MAX_FILE_OPERATIONS = 20
+MAX_OPERATION_REASON_BYTES = 2 * 1024
 SKIPPED_SEARCH_DIRECTORIES = frozenset(
     {
         ".aws",
@@ -48,6 +59,19 @@ WINDOWS_RESERVED_NAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
+FORBIDDEN_CREDENTIAL_NAMES = frozenset(
+    {
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "id_ed25519",
+        "id_rsa",
+    }
+)
+FORBIDDEN_CREDENTIAL_DIRECTORIES = frozenset({".aws", ".azure", ".ssh"})
 
 TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
     {
@@ -132,6 +156,50 @@ TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_file_operations",
+            "description": (
+                "Request one-time user approval for high-risk file effects: create or "
+                "overwrite text, write binary bytes, delete a file, move or rename a "
+                "file, modify multiple files, or touch sensitive or external targets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string"},
+                    "operations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_FILE_OPERATIONS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "write_text",
+                                        "write_binary",
+                                        "delete",
+                                        "move",
+                                    ],
+                                },
+                                "path": {"type": "string"},
+                                "destination": {"type": "string"},
+                                "content": {"type": "string"},
+                                "content_base64": {"type": "string"},
+                            },
+                            "required": ["kind", "path"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["reason", "operations"],
+                "additionalProperties": False,
+            },
+        },
+    },
 )
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +225,7 @@ class ToolRegistry:
         self._workspace = workspace.resolve(strict=True)
         self._observations: list[FileObservation] = []
         self._latest_observations: dict[str, FileObservation] = {}
+        self._pending_approvals: dict[str, PreparedOperation] = {}
 
     @property
     def observation_history(self) -> tuple[FileObservation, ...]:
@@ -184,13 +253,32 @@ class ToolRegistry:
         prepared = self._prepare_file_edit(call, arguments)
         return prepared if isinstance(prepared, FileEditPreview) else None
 
+    def prepare_operation(self, call: ToolCall) -> PreparedOperation | None:
+        if call.name != "apply_file_operations":
+            return None
+        arguments, error = self._parsed_arguments(call)
+        if error is not None or arguments is None:
+            return None
+        prepared = self._prepare_file_operations(call, arguments)
+        if not isinstance(prepared, PreparedOperation):
+            return None
+        self._pending_approvals[prepared.fingerprint] = prepared
+        return prepared
+
     def execute(
         self,
         call: ToolCall,
         *,
         preview: FileEditPreview | None = None,
+        approved_operation: PreparedOperation | None = None,
     ) -> ToolResult:
-        if call.name not in {"list_workspace", "search_text", "read_file", "apply_patch"}:
+        if call.name not in {
+            "list_workspace",
+            "search_text",
+            "read_file",
+            "apply_patch",
+            "apply_file_operations",
+        }:
             return self._error(call, "unknown_tool", "未知工具", "<unknown>")
         arguments, error = self._parsed_arguments(call)
         if error is not None:
@@ -215,11 +303,360 @@ class ToolRegistry:
                 )
             return self._apply_file_edit(call, prepared)
 
+        if call.name == "apply_file_operations":
+            prepared_effects = approved_operation or self._prepare_file_operations(
+                call, arguments
+            )
+            if isinstance(prepared_effects, ToolResult):
+                return prepared_effects
+            if approved_operation is None:
+                self._pending_approvals.pop(prepared_effects.fingerprint, None)
+                return self._error(
+                    call,
+                    "permission_denied",
+                    "高风险文件操作需要用户本次明确允许",
+                )
+            if (
+                approved_operation.call_id != call.id
+                or approved_operation.arguments_json != call.arguments_json
+                or approved_operation.operation != call.name
+                or self._pending_approvals.get(approved_operation.fingerprint)
+                is not approved_operation
+            ):
+                return self._error(
+                    call,
+                    "permission_denied",
+                    "批准与当前规范化操作不匹配",
+                )
+            self._pending_approvals.pop(approved_operation.fingerprint)
+            return self._execute_file_operations(call, approved_operation)
+
         if call.name == "list_workspace":
             return self._list_workspace(call, arguments)
         if call.name == "search_text":
             return self._search_text(call, arguments)
         return self._read_file(call, arguments)
+
+    def _prepare_file_operations(
+        self,
+        call: ToolCall,
+        arguments: dict[str, Any],
+    ) -> PreparedOperation | ToolResult:
+        reason = arguments["reason"]
+        raw_operations = arguments["operations"]
+        assert isinstance(reason, str)
+        assert isinstance(raw_operations, list)
+        if len(raw_operations) > 1 and any(
+            operation["kind"] not in {"write_text", "write_binary"}
+            for operation in raw_operations
+        ):
+            return self._error(
+                call,
+                "permission_denied",
+                "包含删除或移动的批量操作无法安全协调，默认拒绝",
+            )
+
+        effects: list[NormalizedFileEffect] = []
+        occupied_paths: set[Path] = set()
+        for raw_operation in raw_operations:
+            assert isinstance(raw_operation, dict)
+            normalized = self._normalize_file_effect(call, raw_operation)
+            if isinstance(normalized, ToolResult):
+                return normalized
+            effect_paths = {normalized.target}
+            if normalized.destination is not None:
+                effect_paths.add(normalized.destination)
+            if occupied_paths.intersection(effect_paths):
+                return self._error(
+                    call,
+                    "permission_denied",
+                    "批量操作包含重叠目标，无法可靠规范化",
+                )
+            occupied_paths.update(effect_paths)
+            effects.append(normalized)
+
+        display_items = []
+        resolved_targets: list[str] = []
+        for effect in effects:
+            item: dict[str, object] = {
+                "kind": effect.kind,
+                "path": str(effect.target),
+                "effect": effect.effect,
+            }
+            resolved_targets.append(str(effect.target))
+            if effect.destination is not None:
+                item["destination"] = str(effect.destination)
+                resolved_targets.append(str(effect.destination))
+            if effect.content is not None:
+                item["content_bytes"] = len(effect.content)
+                item["content_sha256"] = hashlib.sha256(effect.content).hexdigest()
+            if effect.previous_sha256 is not None:
+                item["previous_sha256"] = effect.previous_sha256
+            display_items.append(item)
+        parameters = json.dumps(
+            {"operations": display_items},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint_payload = json.dumps(
+            {
+                "operation": call.name,
+                "reason": reason,
+                "workspace": str(self._workspace),
+                "parameters": parameters,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        has_external = any(
+            effect.sensitivity in {
+                "workspace_external",
+                "sensitive_workspace_external",
+            }
+            for effect in effects
+        )
+        has_sensitive = any(
+            effect.sensitivity in {"sensitive", "sensitive_workspace_external"}
+            for effect in effects
+        )
+        sensitivity: Sensitivity
+        if has_external and has_sensitive:
+            sensitivity = "sensitive_workspace_external"
+        elif has_external:
+            sensitivity = "workspace_external"
+        elif has_sensitive:
+            sensitivity = "sensitive"
+        else:
+            sensitivity = "normal"
+        effect_labels = ", ".join(effect.effect for effect in effects)
+        unit = "file effect" if len(effects) == 1 else "file effects"
+        return PreparedOperation(
+            call_id=call.id,
+            arguments_json=call.arguments_json,
+            fingerprint=hashlib.sha256(fingerprint_payload).hexdigest(),
+            operation=call.name,
+            parameters=parameters,
+            resolved_targets=tuple(resolved_targets),
+            reason=reason,
+            impact_scope=f"{len(effects)} {unit}: {effect_labels}",
+            workspace=str(self._workspace),
+            sensitivity=sensitivity,
+            effects=tuple(effects),
+        )
+
+    def _normalize_file_effect(
+        self,
+        call: ToolCall,
+        operation: dict[str, Any],
+    ) -> NormalizedFileEffect | ToolResult:
+        kind = cast(FileEffectKind, operation["kind"])
+        requested_path = operation["path"]
+        assert isinstance(kind, str) and isinstance(requested_path, str)
+        unresolved = Path(requested_path)
+        if not unresolved.is_absolute():
+            unresolved = self._workspace / unresolved
+        if unresolved.is_symlink():
+            return self._error(call, "permission_denied", "特殊文件或链接默认拒绝")
+        try:
+            target = unresolved.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return self._error(call, "permission_denied", "目标无法规范化")
+        sensitivity = self._high_risk_sensitivity(target)
+        if sensitivity is None:
+            return self._error(call, "permission_denied", "凭据位置或特殊目标默认拒绝")
+
+        destination: Path | None = None
+        content: bytes | None = None
+        previous_sha256: str | None = None
+        if target.exists():
+            if not target.is_file():
+                return self._error(call, "permission_denied", "只允许可验证的普通文件效果")
+            try:
+                if target.stat().st_nlink != 1:
+                    return self._error(
+                        call,
+                        "permission_denied",
+                        "硬链接目标无法安全识别其完整影响范围",
+                    )
+                previous_sha256 = self._hash_file(target)
+            except OSError:
+                return self._error(call, "permission_denied", "无法读取目标前置状态")
+        elif kind in {"delete", "move"}:
+            return self._error(call, "permission_denied", "删除或移动目标不存在")
+        elif not target.parent.is_dir():
+            return self._error(call, "permission_denied", "目标父目录不存在或不是普通目录")
+
+        if kind == "write_text":
+            raw_content = operation["content"]
+            assert isinstance(raw_content, str)
+            content = raw_content.encode("utf-8")
+            effect = "overwrite_text" if previous_sha256 is not None else "create_text"
+        elif kind == "write_binary":
+            encoded_content = operation["content_base64"]
+            assert isinstance(encoded_content, str)
+            content = base64.b64decode(encoded_content, validate=True)
+            effect = "overwrite_binary" if previous_sha256 is not None else "create_binary"
+        elif kind == "delete":
+            effect = "delete"
+        else:
+            requested_destination = operation["destination"]
+            assert isinstance(requested_destination, str)
+            unresolved_destination = Path(requested_destination)
+            if not unresolved_destination.is_absolute():
+                unresolved_destination = self._workspace / unresolved_destination
+            if unresolved_destination.is_symlink():
+                return self._error(call, "permission_denied", "目标链接默认拒绝")
+            try:
+                destination = unresolved_destination.resolve(strict=False)
+            except (OSError, RuntimeError):
+                return self._error(call, "permission_denied", "移动目标无法规范化")
+            destination_sensitivity = self._high_risk_sensitivity(destination)
+            if destination_sensitivity is None:
+                return self._error(call, "permission_denied", "移动目标属于禁止位置")
+            if destination.exists() or not destination.parent.is_dir():
+                return self._error(
+                    call,
+                    "permission_denied",
+                    "移动目标必须不存在且父目录必须已存在",
+                )
+            sensitivity = self._combine_sensitivity(
+                sensitivity,
+                destination_sensitivity,
+            )
+            effect = "rename" if target.parent == destination.parent else "move"
+
+        return NormalizedFileEffect(
+            kind=kind,
+            target=target,
+            destination=destination,
+            content=content,
+            effect=effect,
+            sensitivity=sensitivity,
+            previous_sha256=previous_sha256,
+        )
+
+    def _high_risk_sensitivity(self, target: Path) -> Sensitivity | None:
+        parts = tuple(part.casefold() for part in target.parts)
+        for part in parts:
+            stem = part.split(".", maxsplit=1)[0]
+            if (
+                part in FORBIDDEN_CREDENTIAL_NAMES
+                or part in FORBIDDEN_CREDENTIAL_DIRECTORIES
+                or part == ".git"
+                or Path(part).suffix in SENSITIVE_SUFFIXES
+                or stem in WINDOWS_RESERVED_NAMES
+            ):
+                return None
+        sensitive = any(part == ".env" or part.startswith(".env.") for part in parts)
+        try:
+            target.relative_to(self._workspace)
+        except ValueError:
+            return "sensitive_workspace_external" if sensitive else "workspace_external"
+        return "sensitive" if sensitive else "normal"
+
+    @staticmethod
+    def _combine_sensitivity(
+        first: Sensitivity,
+        second: Sensitivity,
+    ) -> Sensitivity:
+        external = {
+            "workspace_external",
+            "sensitive_workspace_external",
+        }
+        sensitive = {"sensitive", "sensitive_workspace_external"}
+        has_external = first in external or second in external
+        has_sensitive = first in sensitive or second in sensitive
+        if has_external and has_sensitive:
+            return "sensitive_workspace_external"
+        if has_external:
+            return "workspace_external"
+        if has_sensitive:
+            return "sensitive"
+        return "normal"
+
+    def _execute_file_operations(
+        self,
+        call: ToolCall,
+        operation: PreparedOperation,
+    ) -> ToolResult:
+        results: list[dict[str, object]] = []
+        try:
+            for effect in operation.effects:
+                if effect.kind in {"write_text", "write_binary"}:
+                    assert effect.content is not None
+                    self._atomic_write_bytes(effect.target, effect.content)
+                    content_hash = self._hash_file(effect.target)
+                    relative = self._relative_path(effect.target)
+                    if relative != "<outside-workspace>":
+                        self._record_observation(relative, content_hash, "write")
+                    results.append(
+                        {
+                            "effect": effect.effect,
+                            "target": str(effect.target),
+                            "sha256": content_hash,
+                        }
+                    )
+                elif effect.kind == "delete":
+                    effect.target.unlink()
+                    results.append({"effect": effect.effect, "target": str(effect.target)})
+                else:
+                    assert effect.destination is not None
+                    os.replace(effect.target, effect.destination)
+                    content_hash = self._hash_file(effect.destination)
+                    relative = self._relative_path(effect.destination)
+                    if relative != "<outside-workspace>":
+                        self._record_observation(relative, content_hash, "write")
+                    results.append(
+                        {
+                            "effect": effect.effect,
+                            "target": str(effect.target),
+                            "destination": str(effect.destination),
+                            "sha256": content_hash,
+                        }
+                    )
+        except OSError:
+            return self._error(
+                call,
+                "operation_failed",
+                "已批准的文件操作执行失败；后续效果未执行",
+            )
+        return self._success(
+            call,
+            operation.impact_scope,
+            {"fingerprint": operation.fingerprint, "effects": results},
+        )
+
+    @staticmethod
+    def _atomic_write_bytes(target: Path, content: bytes) -> None:
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=target.parent,
+                prefix=".wesly-effect-",
+                delete=False,
+            ) as temporary:
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            if target.exists():
+                os.chmod(temporary_path, target.stat().st_mode)
+            os.replace(temporary_path, target)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _hash_file(target: Path) -> str:
+        with target.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
 
     def _parsed_arguments(
         self,
@@ -694,9 +1131,29 @@ class ToolRegistry:
             "search_text": {"query", "path", "cursor", "limit"},
             "read_file": {"path", "cursor", "limit"},
             "apply_patch": {"path", "expected_sha256", "old_text", "new_text"},
+            "apply_file_operations": {"reason", "operations"},
         }[tool_name]
         if set(arguments) - allowed:
             return "工具参数包含未知字段"
+        if tool_name == "apply_file_operations":
+            if set(arguments) != {"reason", "operations"}:
+                return "apply_file_operations 必须提供 reason 和 operations"
+            reason = arguments["reason"]
+            operations = arguments["operations"]
+            if not isinstance(reason, str) or not reason.strip():
+                return "reason 必须是非空字符串"
+            if len(reason.encode("utf-8")) > MAX_OPERATION_REASON_BYTES:
+                return "reason 超过大小上限"
+            if (
+                not isinstance(operations, list)
+                or not 1 <= len(operations) <= MAX_FILE_OPERATIONS
+            ):
+                return f"operations 必须包含 1 到 {MAX_FILE_OPERATIONS} 项"
+            for operation in operations:
+                error = ToolRegistry._validate_file_operation(operation)
+                if error is not None:
+                    return error
+            return None
         if tool_name == "apply_patch":
             required = {"path", "expected_sha256", "old_text", "new_text"}
             if not required.issubset(arguments):
@@ -743,6 +1200,47 @@ class ToolRegistry:
                 return "query 必须是非空字符串"
         if tool_name == "read_file" and "path" not in arguments:
             return "read_file 必须提供 path"
+        return None
+
+    @staticmethod
+    def _validate_file_operation(operation: Any) -> str | None:
+        if not isinstance(operation, dict):
+            return "每个文件操作必须是对象"
+        kind = operation.get("kind")
+        path = operation.get("path")
+        if kind not in {"write_text", "write_binary", "delete", "move"}:
+            return "文件操作 kind 无效"
+        if not isinstance(path, str) or not path:
+            return "文件操作 path 必须是非空字符串"
+        required_by_kind = {
+            "write_text": {"kind", "path", "content"},
+            "write_binary": {"kind", "path", "content_base64"},
+            "delete": {"kind", "path"},
+            "move": {"kind", "path", "destination"},
+        }
+        expected = required_by_kind[kind]
+        if set(operation) != expected:
+            return f"{kind} 参数字段不完整或包含未知字段"
+        if kind == "write_text":
+            content = operation["content"]
+            if not isinstance(content, str):
+                return "content 必须是字符串"
+            if len(content.encode("utf-8")) > MAX_HIGH_RISK_CONTENT_BYTES:
+                return "文本内容超过大小上限"
+        elif kind == "write_binary":
+            encoded = operation["content_base64"]
+            if not isinstance(encoded, str):
+                return "content_base64 必须是字符串"
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                return "content_base64 不是有效 Base64"
+            if len(content) > MAX_HIGH_RISK_CONTENT_BYTES:
+                return "二进制内容超过大小上限"
+        elif kind == "move":
+            destination = operation["destination"]
+            if not isinstance(destination, str) or not destination:
+                return "destination 必须是非空字符串"
         return None
 
     def _success(

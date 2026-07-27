@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wesly.model import Usage
+from wesly.permissions import ApprovalDecision, Sensitivity
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,26 @@ class FileDiffProposed:
     call_id: str
     path: str
     diff: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequested:
+    call_id: str
+    fingerprint: str
+    operation: str
+    parameters: str
+    resolved_targets: tuple[str, ...]
+    reason: str
+    impact_scope: str
+    workspace: str
+    sensitivity: Sensitivity
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalDecided:
+    call_id: str
+    fingerprint: str
+    decision: ApprovalDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +82,8 @@ AgentEvent = (
     | ModelCompleted
     | ToolStarted
     | FileDiffProposed
+    | ApprovalRequested
+    | ApprovalDecided
     | ToolCompleted
     | RunCompleted
     | RunFailed

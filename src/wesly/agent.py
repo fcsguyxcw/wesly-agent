@@ -8,6 +8,8 @@ from wesly.context import (
 from wesly.evidence import extract_file_citations
 from wesly.events import (
     AgentEvent,
+    ApprovalDecided,
+    ApprovalRequested,
     FileDiffProposed,
     ModelCompleted,
     ModelStarted,
@@ -17,6 +19,7 @@ from wesly.events import (
     ToolStarted,
 )
 from wesly.model import Message, ModelClient, ModelProviderError, Usage
+from wesly.permissions import ApprovalProvider
 from wesly.tools import ToolRegistry
 
 
@@ -26,12 +29,14 @@ class Agent:
         model_client: ModelClient,
         context_builder: ContextBuilder | None = None,
         tool_registry: ToolRegistry | None = None,
+        approval_provider: ApprovalProvider | None = None,
         max_model_turns: int = 12,
         max_tool_calls: int = 30,
     ) -> None:
         self._model_client = model_client
         self._context_builder = context_builder or DirectAnswerContextBuilder()
         self._tool_registry = tool_registry
+        self._approval_provider = approval_provider
         self._max_model_turns = max_model_turns
         self._max_tool_calls = max_tool_calls
 
@@ -121,7 +126,37 @@ class Agent:
                                 path=preview.path,
                                 diff=preview.diff,
                             )
-                        result = self._tool_registry.execute(call, preview=preview)
+                        prepared_operation = self._tool_registry.prepare_operation(call)
+                        approved_operation = None
+                        if prepared_operation is not None:
+                            yield ApprovalRequested(
+                                call_id=call.id,
+                                fingerprint=prepared_operation.fingerprint,
+                                operation=prepared_operation.operation,
+                                parameters=prepared_operation.parameters,
+                                resolved_targets=prepared_operation.resolved_targets,
+                                reason=prepared_operation.reason,
+                                impact_scope=prepared_operation.impact_scope,
+                                workspace=prepared_operation.workspace,
+                                sensitivity=prepared_operation.sensitivity,
+                            )
+                            decision = (
+                                self._approval_provider.decide(prepared_operation)
+                                if self._approval_provider is not None
+                                else "deny"
+                            )
+                            yield ApprovalDecided(
+                                call_id=call.id,
+                                fingerprint=prepared_operation.fingerprint,
+                                decision=decision,
+                            )
+                            if decision == "allow_once":
+                                approved_operation = prepared_operation
+                        result = self._tool_registry.execute(
+                            call,
+                            preview=preview,
+                            approved_operation=approved_operation,
+                        )
                     except KeyboardInterrupt:
                         yield RunFailed(
                             stop_reason="interrupted",

@@ -42,12 +42,21 @@ def test_workspace_context_exposes_read_and_patch_contracts(
         cast(Mapping[str, object], tool["function"]) for tool in request.tools
     ]
     tool_names = [definition["name"] for definition in function_definitions]
-    assert tool_names == ["list_workspace", "search_text", "read_file", "apply_patch"]
+    assert tool_names == [
+        "list_workspace",
+        "search_text",
+        "read_file",
+        "apply_patch",
+        "apply_file_operations",
+    ]
     assert all(
         "next_cursor" in str(definition["description"])
         for definition in function_definitions[:3]
     )
     assert "latest sha256" in str(function_definitions[3]["description"])
+    assert "one-time user approval" in str(function_definitions[4]["description"])
+    assert "explicit one-time approval" in request.instructions[0]
+    assert "Credential locations and special files remain forbidden" in request.instructions[0]
     assert "actual observed workspace-relative path" in request.instructions[0]
     assert "[[" not in request.instructions[0]
     assert "continue with its next_cursor" in request.instructions[0]
