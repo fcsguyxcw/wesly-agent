@@ -1,5 +1,7 @@
 from collections.abc import Sequence
 import hashlib
+import json
+import sys
 from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
@@ -369,6 +371,55 @@ def test_cli_shows_normalized_approval_and_denial(
     assert "操作指纹: " in output
     assert "[approval] 拒绝\n" in output
     assert "[error] apply_file_operations error\n" in output
+
+
+def test_cli_approves_and_runs_controlled_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    stdout = StringIO()
+    call = ToolCall(
+        "command",
+        "run_command",
+        json.dumps(
+            {
+                "mode": "argv",
+                "executable": sys.executable,
+                "args": ["-c", "from pathlib import Path; Path('result.txt').write_text('done')"],
+                "cwd": ".",
+                "env": {},
+                "timeout_seconds": 10,
+                "reason": "运行受控 CLI 命令",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    client = ScriptedModelClient(
+        [
+            ModelTurn(None, (call,), "tool_calls", Usage(5, 2)),
+            ModelTurn("命令完成。", (), "stop", Usage(7, 3)),
+        ]
+    )
+
+    exit_code = run_cli(
+        ["运行命令"],
+        model_client=client,
+        stdin=StringIO("y\n"),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "done"
+    assert "[approval] 命令执行需要本次批准\n" in output
+    assert "操作: run_command\n" in output
+    assert "python.exe" in output
+    assert '"cwd": "."' in output
+    assert "原因: 运行受控 CLI 命令\n" in output
+    assert "[approval] 本次允许\n" in output
+    assert "[ok] run_command success\n" in output
 
 
 def test_cli_interrupt_during_approval_is_safe(

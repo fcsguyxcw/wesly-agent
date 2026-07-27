@@ -48,6 +48,7 @@ def test_workspace_context_exposes_read_and_patch_contracts(
         "read_file",
         "apply_patch",
         "apply_file_operations",
+        "run_command",
     ]
     assert all(
         "next_cursor" in str(definition["description"])
@@ -55,7 +56,12 @@ def test_workspace_context_exposes_read_and_patch_contracts(
     )
     assert "latest sha256" in str(function_definitions[3]["description"])
     assert "one-time user approval" in str(function_definitions[4]["description"])
+    assert "Every execution requires fresh one-time user approval" in str(
+        function_definitions[5]["description"]
+    )
     assert "explicit one-time approval" in request.instructions[0]
+    assert "complete PowerShell source" in request.instructions[0]
+    assert "argv mode never invokes a shell" in request.instructions[0]
     assert "Credential locations and special files remain forbidden" in request.instructions[0]
     assert "actual observed workspace-relative path" in request.instructions[0]
     assert "[[" not in request.instructions[0]

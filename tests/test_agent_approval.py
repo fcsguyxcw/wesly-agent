@@ -1,4 +1,5 @@
 import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -118,6 +119,50 @@ def test_agent_allow_once_executes_exact_operation(tmp_path: Path) -> None:
     assert decision.decision == "allow_once"
     completed = next(event for event in events if isinstance(event, ToolCompleted))
     assert completed.status == "success"
+
+
+def test_agent_requests_fresh_approval_for_each_command(tmp_path: Path) -> None:
+    def command(call_id: str) -> ToolCall:
+        return ToolCall(
+            call_id,
+            "run_command",
+            json.dumps(
+                {
+                    "mode": "argv",
+                    "executable": sys.executable,
+                    "args": [
+                        "-c",
+                        "from pathlib import Path; Path('runs.txt').open('a').write('x')",
+                    ],
+                    "cwd": ".",
+                    "env": {},
+                    "timeout_seconds": 10,
+                    "reason": "验证每次命令均重新审批",
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    approval = FixedApprovalProvider("allow_once")
+    client = RecordingModelClient(
+        [
+            ModelTurn(None, (command("first"), command("second")), "tool_calls", Usage(5, 2)),
+            ModelTurn("完成。", (), "stop", Usage(7, 3)),
+        ]
+    )
+    agent = Agent(
+        client,
+        context_builder=ReadOnlyContextBuilder(tmp_path),
+        tool_registry=ToolRegistry(tmp_path),
+        approval_provider=approval,
+    )
+
+    events = list(agent.run("运行两次命令"))
+
+    assert len(approval.requests) == 2
+    assert (tmp_path / "runs.txt").read_text(encoding="utf-8") == "xx"
+    completed = [event for event in events if isinstance(event, ToolCompleted)]
+    assert [event.status for event in completed] == ["success", "success"]
 
 
 def test_concurrent_drift_after_approval_is_auditable_and_has_no_effect(

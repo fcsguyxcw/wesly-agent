@@ -109,7 +109,7 @@ def test_agent_returns_validation_failures_to_the_model(tmp_path: Path) -> None:
                 content=None,
                 tool_calls=(
                     ToolCall("bad-json", "list_workspace", "{"),
-                    ToolCall("unknown", "run_command", "{}"),
+                    ToolCall("unknown", "unknown_tool", "{}"),
                     ToolCall("escape", "list_workspace", '{"path":".."}'),
                 ),
                 finish_reason="tool_calls",

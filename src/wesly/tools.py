@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from wesly.commands import CommandExecution, CommandRunner
 from wesly.model import ToolCall, ToolResult
 from wesly.permissions import (
     FileEffectKind,
@@ -200,6 +201,38 @@ TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Run exactly one executable with argv, or one complete Windows PowerShell "
+                "script. Every execution requires fresh one-time user approval."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["argv", "powershell"]},
+                    "executable": {"type": "string"},
+                    "args": {"type": "array", "items": {"type": "string"}},
+                    "powershell_script": {"type": "string"},
+                    "cwd": {"type": "string"},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 600,
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["mode", "cwd", "env", "timeout_seconds", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
 )
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +256,7 @@ class FileEditPreview:
 class ToolRegistry:
     def __init__(self, workspace: Path) -> None:
         self._workspace = workspace.resolve(strict=True)
+        self._command_runner = CommandRunner(self._workspace)
         self._observations: list[FileObservation] = []
         self._latest_observations: dict[str, FileObservation] = {}
         self._pending_approvals: dict[str, PreparedOperation] = {}
@@ -254,12 +288,12 @@ class ToolRegistry:
         return prepared if isinstance(prepared, FileEditPreview) else None
 
     def prepare_operation(self, call: ToolCall) -> PreparedOperation | None:
-        if call.name != "apply_file_operations":
+        if call.name not in {"apply_file_operations", "run_command"}:
             return None
         arguments, error = self._parsed_arguments(call)
         if error is not None or arguments is None:
             return None
-        prepared = self._prepare_file_operations(call, arguments)
+        prepared = self._prepare_operation(call, arguments)
         if not isinstance(prepared, PreparedOperation):
             return None
         self._pending_approvals[prepared.fingerprint] = prepared
@@ -282,6 +316,7 @@ class ToolRegistry:
             "read_file",
             "apply_patch",
             "apply_file_operations",
+            "run_command",
         }:
             return self._error(call, "unknown_tool", "未知工具", "<unknown>")
         arguments, error = self._parsed_arguments(call)
@@ -307,10 +342,8 @@ class ToolRegistry:
                 )
             return self._apply_file_edit(call, prepared)
 
-        if call.name == "apply_file_operations":
-            prepared_effects = approved_operation or self._prepare_file_operations(
-                call, arguments
-            )
+        if call.name in {"apply_file_operations", "run_command"}:
+            prepared_effects = approved_operation or self._prepare_operation(call, arguments)
             if isinstance(prepared_effects, ToolResult):
                 return prepared_effects
             if approved_operation is None:
@@ -318,7 +351,7 @@ class ToolRegistry:
                 return self._error(
                     call,
                     "permission_denied",
-                    "高风险文件操作需要用户本次明确允许",
+                    "该操作需要用户本次明确允许",
                 )
             if (
                 approved_operation.call_id != call.id
@@ -340,6 +373,9 @@ class ToolRegistry:
             if isinstance(revalidated, ToolResult):
                 return revalidated
             self._pending_approvals.pop(approved_operation.fingerprint)
+            if call.name == "run_command":
+                assert revalidated.command is not None
+                return self._command_result(call, self._command_runner.execute(revalidated.command))
             return self._execute_file_operations(call, revalidated)
 
         if call.name == "list_workspace":
@@ -355,7 +391,7 @@ class ToolRegistry:
         approved_operation: PreparedOperation,
     ) -> PreparedOperation | ToolResult:
         try:
-            current = self._prepare_file_operations(call, arguments)
+            current = self._prepare_operation(call, arguments)
         except Exception:
             self._pending_approvals.pop(approved_operation.fingerprint, None)
             return self._error(
@@ -369,6 +405,7 @@ class ToolRegistry:
             or current.resolved_targets != approved_operation.resolved_targets
             or current.sensitivity != approved_operation.sensitivity
             or current.effects != approved_operation.effects
+            or current.command != approved_operation.command
         ):
             self._pending_approvals.pop(approved_operation.fingerprint, None)
             return self._error(
@@ -377,6 +414,18 @@ class ToolRegistry:
                 "批准后的路径、类型、哈希、作用域或效果已变化；请重新调查并审批",
             )
         return current
+
+    def _prepare_operation(
+        self,
+        call: ToolCall,
+        arguments: dict[str, Any],
+    ) -> PreparedOperation | ToolResult:
+        if call.name == "apply_file_operations":
+            return self._prepare_file_operations(call, arguments)
+        prepared = self._command_runner.prepare(call, arguments)
+        if isinstance(prepared, str):
+            return self._error(call, "invalid_command", prepared)
+        return prepared
 
     def _prepare_file_operations(
         self,
@@ -1211,6 +1260,8 @@ class ToolRegistry:
     def _validate_arguments(tool_name: str, arguments: Any) -> str | None:
         if not isinstance(arguments, dict):
             return "工具参数必须是对象"
+        if tool_name == "run_command":
+            return CommandRunner.validate_arguments(arguments)
         allowed = {
             "list_workspace": {"path", "cursor", "limit"},
             "search_text": {"query", "path", "cursor", "limit"},
@@ -1286,6 +1337,31 @@ class ToolRegistry:
         if tool_name == "read_file" and "path" not in arguments:
             return "read_file 必须提供 path"
         return None
+
+    @staticmethod
+    def _command_result(call: ToolCall, execution: CommandExecution) -> ToolResult:
+        content = json.dumps(execution.payload, ensure_ascii=False, separators=(",", ":"))
+        if len(content.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.name,
+                status="error",
+                content=json.dumps(
+                    {"error": "命令结果超过大小上限", "error_code": "tool_result_too_large"},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                error_code="tool_result_too_large",
+                target="run_command",
+            )
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.name,
+            status=execution.status,
+            content=content,
+            error_code=execution.error_code,
+            target="run_command",
+        )
 
     @staticmethod
     def _validate_file_operation(operation: Any) -> str | None:

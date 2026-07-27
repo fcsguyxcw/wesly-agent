@@ -83,7 +83,12 @@ def run_cli(
                 safe_diff = _safe_diff_text(event.diff)
                 print(safe_diff, end="" if safe_diff.endswith("\n") else "\n", file=stdout)
             elif isinstance(event, ApprovalRequested):
-                print("[approval] 高风险文件操作需要本次批准", file=stdout)
+                approval_label = (
+                    "命令执行需要本次批准"
+                    if event.operation == "run_command"
+                    else "高风险文件操作需要本次批准"
+                )
+                print(f"[approval] {approval_label}", file=stdout)
                 print(f"操作: {_safe_prompt_text(event.operation)}", file=stdout)
                 print(f"参数: {_safe_prompt_text(event.parameters)}", file=stdout)
                 print(

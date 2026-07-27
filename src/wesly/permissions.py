@@ -35,6 +35,18 @@ class NormalizedFileEffect:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizedCommand:
+    mode: Literal["argv", "powershell"]
+    executable: Path
+    executable_sha256: str
+    argv: tuple[str, ...]
+    cwd: Path
+    env: tuple[tuple[str, str], ...]
+    timeout_seconds: int
+    redacted_values: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedOperation:
     call_id: str
     arguments_json: str
@@ -47,6 +59,7 @@ class PreparedOperation:
     workspace: str
     sensitivity: Sensitivity
     effects: tuple[NormalizedFileEffect, ...]
+    command: NormalizedCommand | None = None
 
 
 class ApprovalProvider(Protocol):
