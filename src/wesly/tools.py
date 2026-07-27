@@ -28,6 +28,8 @@ MAX_PATCH_FRAGMENT_BYTES = 32 * 1024
 MAX_HIGH_RISK_CONTENT_BYTES = 1024 * 1024
 MAX_FILE_OPERATIONS = 20
 MAX_OPERATION_REASON_BYTES = 2 * 1024
+MAX_COMMAND_SNAPSHOT_FILES = 10_000
+MAX_COMMAND_SNAPSHOT_BYTES = 64 * 1024 * 1024
 SKIPPED_SEARCH_DIRECTORIES = frozenset(
     {
         ".aws",
@@ -227,8 +229,19 @@ TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
                         "maximum": 600,
                     },
                     "reason": {"type": "string"},
+                    "purpose": {
+                        "type": "string",
+                        "enum": ["inspect", "verify", "build", "modify", "other"],
+                    },
                 },
-                "required": ["mode", "cwd", "env", "timeout_seconds", "reason"],
+                "required": [
+                    "mode",
+                    "cwd",
+                    "env",
+                    "timeout_seconds",
+                    "reason",
+                    "purpose",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -251,6 +264,12 @@ class FileEditPreview:
     previous_sha256: str
     updated_bytes: bytes
     diff: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceSnapshot:
+    hashes: Mapping[str, str]
+    complete: bool
 
 
 class ToolRegistry:
@@ -375,7 +394,17 @@ class ToolRegistry:
             self._pending_approvals.pop(approved_operation.fingerprint)
             if call.name == "run_command":
                 assert revalidated.command is not None
-                return self._command_result(call, self._command_runner.execute(revalidated.command))
+                before = self._snapshot_workspace()
+                execution = self._command_runner.execute(revalidated.command)
+                after = self._snapshot_workspace()
+                changed_paths = self._changed_snapshot_paths(before, after)
+                return self._command_result(
+                    call,
+                    execution,
+                    purpose=revalidated.command.purpose,
+                    changed_paths=changed_paths,
+                    change_tracking_complete=before.complete and after.complete,
+                )
             return self._execute_file_operations(call, revalidated)
 
         if call.name == "list_workspace":
@@ -695,6 +724,7 @@ class ToolRegistry:
                             "文件效果在原子替换前发生漂移；后续效果未执行",
                             changed_paths=tuple(dict.fromkeys(changed_paths)),
                         )
+                    changed_paths.append(self._effect_display_path(effect.target))
                     content_hash = self._hash_file(effect.target)
                     relative = self._relative_path(effect.target)
                     if relative != "<outside-workspace>":
@@ -706,7 +736,6 @@ class ToolRegistry:
                             "sha256": content_hash,
                         }
                     )
-                    changed_paths.append(self._effect_display_path(effect.target))
                 elif effect.kind == "delete":
                     effect.target.unlink()
                     results.append({"effect": effect.effect, "target": str(effect.target)})
@@ -714,6 +743,12 @@ class ToolRegistry:
                 else:
                     assert effect.destination is not None
                     os.replace(effect.target, effect.destination)
+                    changed_paths.extend(
+                        (
+                            self._effect_display_path(effect.target),
+                            self._effect_display_path(effect.destination),
+                        )
+                    )
                     content_hash = self._hash_file(effect.destination)
                     relative = self._relative_path(effect.destination)
                     if relative != "<outside-workspace>":
@@ -725,12 +760,6 @@ class ToolRegistry:
                             "destination": str(effect.destination),
                             "sha256": content_hash,
                         }
-                    )
-                    changed_paths.extend(
-                        (
-                            self._effect_display_path(effect.target),
-                            self._effect_display_path(effect.destination),
-                        )
                     )
         except OSError:
             return self._error(
@@ -1081,6 +1110,7 @@ class ToolRegistry:
             )
 
         temporary_path: Path | None = None
+        changed_paths: tuple[str, ...] = ()
         try:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -1105,6 +1135,7 @@ class ToolRegistry:
                 )
             os.replace(temporary_path, preview.target)
             temporary_path = None
+            changed_paths = (preview.path,)
             verified_bytes = preview.target.read_bytes()
         except OSError:
             if temporary_path is not None:
@@ -1112,7 +1143,13 @@ class ToolRegistry:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            return self._error(call, "write_failed", "文件原子替换失败", preview.path)
+            return self._error(
+                call,
+                "write_failed",
+                "文件原子替换失败",
+                preview.path,
+                changed_paths=changed_paths,
+            )
 
         updated_sha256 = hashlib.sha256(verified_bytes).hexdigest()
         expected_updated_sha256 = hashlib.sha256(preview.updated_bytes).hexdigest()
@@ -1122,6 +1159,7 @@ class ToolRegistry:
                 "write_verification_failed",
                 "写入后的磁盘哈希与补丁结果不一致",
                 preview.path,
+                changed_paths=changed_paths,
             )
         self._record_observation(preview.path, updated_sha256, "write")
         return self._success(
@@ -1132,7 +1170,7 @@ class ToolRegistry:
                 "previous_sha256": preview.previous_sha256,
                 "sha256": updated_sha256,
             },
-            changed_paths=(preview.path,),
+            changed_paths=changed_paths,
         )
 
     def _record_observation(
@@ -1356,9 +1394,55 @@ class ToolRegistry:
             return "read_file 必须提供 path"
         return None
 
+    def _snapshot_workspace(self) -> WorkspaceSnapshot:
+        warnings: list[dict[str, str]] = []
+        hashes: dict[str, str] = {}
+        total_bytes = 0
+        complete = True
+        for index, path in enumerate(self._iter_files(self._workspace, warnings)):
+            if index >= MAX_COMMAND_SNAPSHOT_FILES:
+                complete = False
+                break
+            try:
+                size = path.stat().st_size
+                if total_bytes + size > MAX_COMMAND_SNAPSHOT_BYTES:
+                    complete = False
+                    break
+                hashes[self._relative_path(path)] = self._hash_file(path)
+                total_bytes += size
+            except OSError:
+                complete = False
+        return WorkspaceSnapshot(hashes=hashes, complete=complete and not warnings)
+
     @staticmethod
-    def _command_result(call: ToolCall, execution: CommandExecution) -> ToolResult:
-        content = json.dumps(execution.payload, ensure_ascii=False, separators=(",", ":"))
+    def _changed_snapshot_paths(
+        before: WorkspaceSnapshot,
+        after: WorkspaceSnapshot,
+    ) -> tuple[str, ...]:
+        return tuple(
+            path
+            for path in sorted(set(before.hashes) | set(after.hashes), key=str.casefold)
+            if before.hashes.get(path) != after.hashes.get(path)
+        )
+
+    @staticmethod
+    def _command_result(
+        call: ToolCall,
+        execution: CommandExecution,
+        *,
+        purpose: Literal["inspect", "verify", "build", "modify", "other"],
+        changed_paths: tuple[str, ...],
+        change_tracking_complete: bool,
+    ) -> ToolResult:
+        payload = dict(execution.payload)
+        payload.update(
+            {
+                "purpose": purpose,
+                "changed_paths": changed_paths,
+                "change_tracking_complete": change_tracking_complete,
+            }
+        )
+        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(content.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
             return ToolResult(
                 call_id=call.id,
@@ -1371,11 +1455,14 @@ class ToolRegistry:
                 ),
                 error_code="tool_result_too_large",
                 target="run_command",
+                changed_paths=changed_paths,
+                command_purpose=purpose,
+                change_tracking_complete=change_tracking_complete,
             )
-        exit_code = execution.payload.get("exit_code")
-        timed_out = execution.payload.get("timed_out")
-        stdout = execution.payload.get("stdout")
-        stderr = execution.payload.get("stderr")
+        exit_code = payload.get("exit_code")
+        timed_out = payload.get("timed_out")
+        stdout = payload.get("stdout")
+        stderr = payload.get("stderr")
         output_truncated = any(
             isinstance(stream, dict) and stream.get("truncated") is True
             for stream in (stdout, stderr)
@@ -1390,6 +1477,9 @@ class ToolRegistry:
             exit_code=exit_code if isinstance(exit_code, int) else None,
             timed_out=timed_out if isinstance(timed_out, bool) else None,
             output_truncated=output_truncated,
+            changed_paths=changed_paths,
+            command_purpose=purpose,
+            change_tracking_complete=change_tracking_complete,
         )
 
     @staticmethod

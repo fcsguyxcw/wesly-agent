@@ -287,6 +287,7 @@ def test_cli_shows_file_diff_before_applying_patch(
     old_hash = hashlib.sha256(target.read_bytes()).hexdigest()
     monkeypatch.chdir(tmp_path)
     stdout = StringIO()
+    stderr = StringIO()
     client = ScriptedModelClient(
         [
             ModelTurn(
@@ -324,11 +325,12 @@ def test_cli_shows_file_diff_before_applying_patch(
         ["把 value 改成 2"],
         model_client=client,
         stdout=stdout,
-        stderr=StringIO(),
+        stderr=stderr,
     )
 
     output = stdout.getvalue()
-    assert exit_code == 0
+    assert exit_code == 1
+    assert "[error] verification_required:" in stderr.getvalue()
     assert target.read_text(encoding="utf-8") == "value = 2\n"
     assert "[diff] sample.py\n" in output
     assert "--- a/sample.py\n+++ b/sample.py\n" in output
@@ -399,6 +401,7 @@ def test_cli_approves_and_runs_controlled_command(
                 "env": {},
                 "timeout_seconds": 10,
                 "reason": "运行受控 CLI 命令",
+                "purpose": "modify",
             },
             ensure_ascii=False,
         ),
@@ -406,6 +409,33 @@ def test_cli_approves_and_runs_controlled_command(
     client = ScriptedModelClient(
         [
             ModelTurn(None, (call,), "tool_calls", Usage(5, 2)),
+            ModelTurn(
+                None,
+                (
+                    ToolCall(
+                        "verify",
+                        "run_command",
+                        json.dumps(
+                            {
+                                "mode": "argv",
+                                "executable": sys.executable,
+                                "args": [
+                                    "-c",
+                                    "from pathlib import Path; assert Path('result.txt').read_text() == 'done'",
+                                ],
+                                "cwd": ".",
+                                "env": {},
+                                "timeout_seconds": 10,
+                                "reason": "验证命令产生的文件",
+                                "purpose": "verify",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                ),
+                "tool_calls",
+                Usage(7, 3),
+            ),
             ModelTurn("命令完成。", (), "stop", Usage(7, 3)),
         ]
     )
@@ -413,7 +443,7 @@ def test_cli_approves_and_runs_controlled_command(
     exit_code = run_cli(
         ["运行命令"],
         model_client=client,
-        stdin=StringIO("y\n"),
+        stdin=StringIO("y\ny\n"),
         stdout=stdout,
         stderr=StringIO(),
     )

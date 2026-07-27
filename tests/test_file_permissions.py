@@ -191,6 +191,64 @@ def test_partial_batch_failure_reports_only_effects_that_already_happened(
     assert second.read_text(encoding="utf-8") == "old-2"
 
 
+def test_batch_write_reports_path_when_post_write_hash_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "first.txt"
+    target.write_text("old", encoding="utf-8")
+    registry = ToolRegistry(tmp_path)
+    call = operation_call(
+        {"kind": "write_text", "path": "first.txt", "content": "new"}
+    )
+    approved = registry.prepare_operation(call)
+    assert isinstance(approved, PreparedOperation)
+    original_hash = registry._hash_file
+
+    def fail_new_content_hash(path: Path) -> str:
+        if path == target and path.read_text(encoding="utf-8") == "new":
+            raise OSError("simulated post-write hash failure")
+        return original_hash(path)
+
+    monkeypatch.setattr(registry, "_hash_file", fail_new_content_hash)
+
+    result = registry.execute(call, approved_operation=approved)
+
+    assert result.error_code == "operation_failed"
+    assert result.changed_paths == ("first.txt",)
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_move_reports_both_paths_when_destination_hash_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("payload", encoding="utf-8")
+    registry = ToolRegistry(tmp_path)
+    call = operation_call(
+        {"kind": "move", "path": "source.txt", "destination": "destination.txt"}
+    )
+    approved = registry.prepare_operation(call)
+    assert isinstance(approved, PreparedOperation)
+    original_hash = registry._hash_file
+
+    def fail_destination_hash(path: Path) -> str:
+        if path == destination:
+            raise OSError("simulated destination hash failure")
+        return original_hash(path)
+
+    monkeypatch.setattr(registry, "_hash_file", fail_destination_hash)
+
+    result = registry.execute(call, approved_operation=approved)
+
+    assert result.error_code == "operation_failed"
+    assert result.changed_paths == ("source.txt", "destination.txt")
+    assert not source.exists()
+    assert destination.read_text(encoding="utf-8") == "payload"
+
+
 def test_binary_write_requires_approval(tmp_path: Path) -> None:
     target = tmp_path / "image.bin"
     target.write_bytes(b"old-binary")

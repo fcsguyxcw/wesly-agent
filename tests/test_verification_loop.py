@@ -52,6 +52,7 @@ def command(call_id: str) -> ToolCall:
                 "env": {},
                 "timeout_seconds": 10,
                 "reason": "验证 add 函数行为",
+                "purpose": "verify",
             },
             ensure_ascii=False,
         ),
@@ -146,7 +147,7 @@ def test_cli_completes_fix_verify_refine_loop_in_real_temporary_repository(
     assert failed_result["exit_code"] == 1
     assert passed_result["exit_code"] == 0
     assert output.count("[approval] 命令执行需要本次批准\n") == 2
-    assert "变更证据: calc.py\n" in output
+    assert "Wesly 记录的工作区变更: calc.py\n" in output
     assert "验证结果:\n- 失败: exit=1 (command_nonzero)\n- 通过: exit=0\n" in output
     assert "模型轮次: 7 | 工具调用: 6 | tokens: 72 输入 / 22 输出\n" in output
 
@@ -193,7 +194,153 @@ def test_cli_reports_incomplete_fix_loop_with_last_verified_state(
     assert exit_code == 1
     assert "[error] provider_error: 验证失败后模型服务不可用\n" in output
     assert "最后动作: run_command error\n" in output
-    assert "变更证据: calc.py\n" in output
+    assert "Wesly 记录的工作区变更: calc.py\n" in output
     assert "验证结果:\n- 失败: exit=1 (command_nonzero)\n" in output
     assert "运行统计: 模型轮次 4 | 工具调用 3\n" in output
     assert "建议: 检查模型服务后重试\n" in output
+
+
+def test_agent_rejects_final_answer_after_failed_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = RecordingModelClient(
+        [
+            turn(
+                ToolCall(
+                    "verify-failed",
+                    "run_command",
+                    json.dumps(
+                        {
+                            "mode": "argv",
+                            "executable": sys.executable,
+                            "args": ["-c", "raise SystemExit(2)"],
+                            "cwd": ".",
+                            "env": {},
+                            "timeout_seconds": 10,
+                            "reason": "运行失败验证",
+                            "purpose": "verify",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            ),
+            ModelTurn("已经完成。", (), "stop", Usage(5, 2)),
+        ]
+    )
+    stderr = StringIO()
+
+    exit_code = run_cli(
+        ["运行验证"],
+        model_client=client,
+        stdin=StringIO("y\n"),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert "[error] verification_failed:" in stderr.getvalue()
+
+
+def test_agent_requires_new_verification_after_a_verified_state_is_modified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    verify = ToolCall(
+        "verify",
+        "run_command",
+        json.dumps(
+            {
+                "mode": "argv",
+                "executable": sys.executable,
+                "args": ["-c", "pass"],
+                "cwd": ".",
+                "env": {},
+                "timeout_seconds": 10,
+                "reason": "先验证当前状态",
+                "purpose": "verify",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    modify = ToolCall(
+        "modify",
+        "run_command",
+        json.dumps(
+            {
+                "mode": "argv",
+                "executable": sys.executable,
+                "args": [
+                    "-c",
+                    "from pathlib import Path; Path('generated.txt').write_text('x')",
+                ],
+                "cwd": ".",
+                "env": {},
+                "timeout_seconds": 10,
+                "reason": "验证后再修改工作区",
+                "purpose": "modify",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    client = RecordingModelClient(
+        [
+            turn(verify),
+            turn(modify),
+            ModelTurn("已经完成。", (), "stop", Usage(5, 2)),
+        ]
+    )
+    stderr = StringIO()
+
+    exit_code = run_cli(
+        ["修改并验证"],
+        model_client=client,
+        stdin=StringIO("y\ny\n"),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert "[error] verification_required:" in stderr.getvalue()
+    assert "Wesly 记录的工作区变更: generated.txt" in stderr.getvalue()
+
+
+def test_successful_inspection_command_is_not_reported_as_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    inspect = ToolCall(
+        "inspect",
+        "run_command",
+        json.dumps(
+            {
+                "mode": "argv",
+                "executable": sys.executable,
+                "args": ["-c", "print('status')"],
+                "cwd": ".",
+                "env": {},
+                "timeout_seconds": 10,
+                "reason": "检查当前状态",
+                "purpose": "inspect",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    client = RecordingModelClient(
+        [turn(inspect), ModelTurn("检查完成。", (), "stop", Usage(5, 2))]
+    )
+    stdout = StringIO()
+
+    exit_code = run_cli(
+        ["检查状态"],
+        model_client=client,
+        stdin=StringIO("y\n"),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert exit_code == 0
+    assert "验证结果:" not in stdout.getvalue()

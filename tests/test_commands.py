@@ -22,6 +22,7 @@ def command_call(
     env: dict[str, str] | None = None,
     timeout_seconds: int = 10,
     reason: str = "运行受控测试命令",
+    purpose: str = "inspect",
     call_id: str = "command",
 ) -> ToolCall:
     return ToolCall(
@@ -36,6 +37,7 @@ def command_call(
                 "env": env or {},
                 "timeout_seconds": timeout_seconds,
                 "reason": reason,
+                "purpose": purpose,
             },
             ensure_ascii=False,
         ),
@@ -79,6 +81,44 @@ def test_command_requires_fresh_approval_for_every_execution(tmp_path: Path) -> 
     second = registry.execute(call, approved_operation=second_approval)
     assert second.status == "success"
     assert marker.read_text(encoding="utf-8") == "xx"
+
+
+def test_command_reports_ordinary_workspace_changes_and_structured_purpose(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry(tmp_path)
+    call = command_call(
+        args=["-c", "from pathlib import Path; Path('generated.txt').write_text('x')"],
+        purpose="modify",
+    )
+
+    result = registry.execute(call, approved_operation=prepare(registry, call))
+    data = payload(result.content)
+
+    assert result.status == "success"
+    assert result.changed_paths == ("generated.txt",)
+    assert result.command_purpose == "modify"
+    assert result.change_tracking_complete is True
+    assert data["purpose"] == "modify"
+    assert data["changed_paths"] == ["generated.txt"]
+    assert data["change_tracking_complete"] is True
+
+
+def test_command_marks_tracking_incomplete_for_sensitive_workspace_files(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry(tmp_path)
+    call = command_call(
+        args=["-c", "from pathlib import Path; Path('.env').write_text('TOKEN=x')"],
+        purpose="modify",
+    )
+
+    result = registry.execute(call, approved_operation=prepare(registry, call))
+
+    assert result.status == "success"
+    assert result.changed_paths == ()
+    assert result.change_tracking_complete is False
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "TOKEN=x"
 
 
 @pytest.mark.parametrize("changed_field", ["args", "cwd", "env"])
@@ -365,6 +405,7 @@ def test_powershell_script_is_approved_as_complete_source(tmp_path: Path) -> Non
                 "env": {},
                 "timeout_seconds": 10,
                 "reason": "运行 PowerShell 验证脚本",
+                "purpose": "modify",
             },
             ensure_ascii=False,
         ),

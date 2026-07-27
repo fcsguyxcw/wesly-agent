@@ -54,6 +54,7 @@ def run_cli(
     )
     changed_paths: list[str] = []
     verifications: list[ToolCompleted] = []
+    change_tracking_complete = True
     last_action: str | None = None
     try:
         for event in agent.run(task):
@@ -122,7 +123,9 @@ def run_cli(
                 for path in event.changed_paths:
                     if path not in changed_paths:
                         changed_paths.append(path)
-                if event.tool_name == "run_command":
+                if event.tool_name == "run_command" and event.change_tracking_complete is False:
+                    change_tracking_complete = False
+                if event.tool_name == "run_command" and event.command_purpose == "verify":
                     verifications.append(event)
                 label = "ok" if event.status == "success" else "error"
                 print(
@@ -146,7 +149,12 @@ def run_cli(
                         "文件证据: " + ", ".join(event.evidence_paths),
                         file=stdout,
                     )
-                _print_execution_evidence(stdout, changed_paths, verifications)
+                _print_execution_evidence(
+                    stdout,
+                    changed_paths,
+                    verifications,
+                    change_tracking_complete=change_tracking_complete,
+                )
                 print(file=stdout)
                 print(
                     f"模型轮次: {event.model_turns} | "
@@ -161,7 +169,12 @@ def run_cli(
                 print(f"[error] {event.stop_reason}: {message}", file=stderr)
                 if last_action is not None:
                     print(f"最后动作: {_safe_activity_text(last_action)}", file=stderr)
-                _print_execution_evidence(stderr, changed_paths, verifications)
+                _print_execution_evidence(
+                    stderr,
+                    changed_paths,
+                    verifications,
+                    change_tracking_complete=change_tracking_complete,
+                )
                 print(
                     f"运行统计: 模型轮次 {event.model_turns} | 工具调用 {event.tool_calls}",
                     file=stderr,
@@ -225,13 +238,19 @@ def _print_execution_evidence(
     stream: TextIO,
     changed_paths: Sequence[str],
     verifications: Sequence[ToolCompleted],
+    *,
+    change_tracking_complete: bool,
 ) -> None:
     if changed_paths:
         print(file=stream)
         print(
-            "变更证据: " + ", ".join(_safe_prompt_text(path) for path in changed_paths),
+            "Wesly 记录的工作区变更: "
+            + ", ".join(_safe_prompt_text(path) for path in changed_paths),
             file=stream,
         )
+    if not change_tracking_complete:
+        print(file=stream)
+        print("[提示] 命令变更追踪不完整，仅覆盖普通授权工作区文件", file=stream)
     if verifications:
         print(file=stream)
         print("验证结果:", file=stream)
@@ -256,6 +275,8 @@ def _failure_suggestion(stop_reason: str) -> str:
         "interrupted": "检查当前工作区状态后再决定是否重试",
         "provider_error": "检查模型服务后重试",
         "evidence_error": "重新调查并只引用本次实际观察的文件",
+        "verification_required": "运行明确的验证命令，确认最后一次变更后再结束",
+        "verification_failed": "根据失败输出继续调查和修复，再重新验证",
     }
     return suggestions.get(stop_reason, "检查最后动作和未完成原因后重试")
 

@@ -37,7 +37,7 @@ class CommandRunner:
     def validate_arguments(arguments: Any) -> str | None:
         if not isinstance(arguments, dict):
             return "工具参数必须是对象"
-        common = {"mode", "cwd", "env", "timeout_seconds", "reason"}
+        common = {"mode", "cwd", "env", "timeout_seconds", "reason", "purpose"}
         mode = arguments.get("mode")
         if mode == "argv":
             required = common | {"executable", "args"}
@@ -54,6 +54,14 @@ class CommandRunner:
             return "reason 必须是非空字符串"
         if len(reason.encode("utf-8")) > MAX_COMMAND_REASON_BYTES:
             return "reason 超过大小上限"
+        if not isinstance(arguments["purpose"], str) or arguments["purpose"] not in {
+            "inspect",
+            "verify",
+            "build",
+            "modify",
+            "other",
+        }:
+            return "purpose 必须是 inspect、verify、build、modify 或 other"
         timeout = arguments["timeout_seconds"]
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
             return f"timeout_seconds 必须是 1 到 {MAX_COMMAND_TIMEOUT_SECONDS} 的整数"
@@ -117,6 +125,7 @@ class CommandRunner:
             cwd=cwd,
             env=env,
             timeout_seconds=arguments["timeout_seconds"],
+            purpose=arguments["purpose"],
             redacted_values=sensitive_values,
         )
         bound = {
@@ -127,6 +136,7 @@ class CommandRunner:
             "cwd": str(cwd),
             "env": env,
             "timeout_seconds": command.timeout_seconds,
+            "purpose": command.purpose,
             "reason": arguments["reason"],
         }
         fingerprint = hashlib.sha256(

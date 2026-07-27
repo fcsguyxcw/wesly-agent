@@ -19,6 +19,7 @@ Sensitivity = Literal[
     "workspace_external",
     "sensitive_workspace_external",
 ]
+CommandPurpose = Literal["inspect", "verify", "build", "modify", "other"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class NormalizedCommand:
     cwd: Path
     env: tuple[tuple[str, str], ...]
     timeout_seconds: int
+    purpose: CommandPurpose
     redacted_values: tuple[str, ...]
 
 

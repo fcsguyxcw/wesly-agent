@@ -118,6 +118,38 @@ def test_patch_uses_atomic_replace_and_leaves_original_on_replace_failure(
     assert len(registry.observation_history) == 1
 
 
+def test_patch_reports_changed_path_when_post_replace_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sample.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    registry = ToolRegistry(tmp_path)
+    old_hash = read_file(registry, "sample.py")["sha256"]
+    assert isinstance(old_hash, str)
+    call = patch_call("sample.py", old_hash)
+    preview = registry.preview(call)
+    assert isinstance(preview, FileEditPreview)
+    original_read_bytes = Path.read_bytes
+    reads = 0
+
+    def fail_post_replace_read(path: Path) -> bytes:
+        nonlocal reads
+        if path == target:
+            reads += 1
+            if reads == 3:
+                raise OSError("simulated post-replace read failure")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_post_replace_read)
+
+    result = registry.execute(call, preview=preview)
+
+    assert result.error_code == "write_failed"
+    assert result.changed_paths == ("sample.py",)
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+
+
 def test_patch_rechecks_hash_immediately_before_atomic_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

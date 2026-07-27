@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Mapping, Protocol
 
+from wesly.permissions import CommandPurpose
+
 
 @dataclass(frozen=True, slots=True)
 class Message:
@@ -38,6 +40,8 @@ class ToolResult:
     exit_code: int | None = None
     timed_out: bool | None = None
     output_truncated: bool | None = None
+    command_purpose: CommandPurpose | None = None
+    change_tracking_complete: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

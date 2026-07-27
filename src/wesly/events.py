@@ -2,7 +2,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wesly.model import Usage
-from wesly.permissions import ApprovalDecision, ApprovalDecisionReason, Sensitivity
+from wesly.permissions import (
+    ApprovalDecision,
+    ApprovalDecisionReason,
+    CommandPurpose,
+    Sensitivity,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +68,8 @@ class ToolCompleted:
     exit_code: int | None = None
     timed_out: bool | None = None
     output_truncated: bool | None = None
+    command_purpose: CommandPurpose | None = None
+    change_tracking_complete: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterator
+from typing import Literal
 
 from wesly.context import (
     ContextBuilder,
@@ -52,6 +53,7 @@ class Agent:
         tool_calls = 0
         usage = Usage(input_tokens=0, output_tokens=0)
         observed_evidence: set[str] = set()
+        verification_state: Literal["clean", "required", "failed"] = "clean"
 
         for turn in range(1, self._max_model_turns + 1):
             try:
@@ -226,6 +228,19 @@ class Agent:
                         return
                     tool_calls += 1
                     observed_evidence.update(result.evidence_paths)
+                    if result.tool_name == "run_command" and result.command_purpose == "verify":
+                        if result.status == "error":
+                            verification_state = "failed"
+                        elif result.changed_paths:
+                            verification_state = "required"
+                        else:
+                            verification_state = "clean"
+                    elif result.changed_paths or (
+                        result.tool_name == "run_command"
+                        and result.status == "success"
+                        and result.command_purpose in {"build", "modify"}
+                    ):
+                        verification_state = "required"
                     yield ToolCompleted(
                         call_id=result.call_id,
                         tool_name=result.tool_name,
@@ -236,6 +251,8 @@ class Agent:
                         exit_code=result.exit_code,
                         timed_out=result.timed_out,
                         output_truncated=result.output_truncated,
+                        command_purpose=result.command_purpose,
+                        change_tracking_complete=result.change_tracking_complete,
                     )
                     history.append(
                         Message(
@@ -250,6 +267,24 @@ class Agent:
                 yield RunFailed(
                     stop_reason="provider_error",
                     message="模型响应不包含答案",
+                    model_turns=turn,
+                    tool_calls=tool_calls,
+                )
+                return
+            if verification_state != "clean":
+                stop_reason = (
+                    "verification_failed"
+                    if verification_state == "failed"
+                    else "verification_required"
+                )
+                message = (
+                    "最近一次明确验证失败；任务不能报告完成"
+                    if verification_state == "failed"
+                    else "最后一次工作区变更之后缺少明确且成功的验证"
+                )
+                yield RunFailed(
+                    stop_reason=stop_reason,
+                    message=message,
                     model_turns=turn,
                     tool_calls=tool_calls,
                 )

@@ -138,6 +138,7 @@ def test_agent_requests_fresh_approval_for_each_command(tmp_path: Path) -> None:
                     "env": {},
                     "timeout_seconds": 10,
                     "reason": "验证每次命令均重新审批",
+                    "purpose": "modify",
                 },
                 ensure_ascii=False,
             ),
