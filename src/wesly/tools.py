@@ -47,7 +47,10 @@ READ_ONLY_TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
         "type": "function",
         "function": {
             "name": "list_workspace",
-            "description": "List one directory inside the authorized workspace.",
+            "description": (
+                "List one directory inside the authorized workspace. If truncated, "
+                "pass the returned next_cursor to continue."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -63,7 +66,10 @@ READ_ONLY_TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
         "type": "function",
         "function": {
             "name": "search_text",
-            "description": "Search UTF-8 text inside one workspace file or directory.",
+            "description": (
+                "Search UTF-8 text inside one workspace file or directory. If "
+                "truncated, pass the returned next_cursor to continue."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,7 +87,10 @@ READ_ONLY_TOOL_DEFINITIONS: tuple[Mapping[str, object], ...] = (
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a page of lines from one UTF-8 workspace file.",
+            "description": (
+                "Read a page of lines from one UTF-8 workspace file. If truncated, "
+                "pass the returned next_cursor to continue instead of rereading it."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

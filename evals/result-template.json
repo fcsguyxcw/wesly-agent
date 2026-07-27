@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "run_id": "YYYYMMDD-HHMMSS-task-id-attempt-1",
+  "task_id": "",
+  "task_version": 1,
+  "repository_commit": "",
+  "wesly_commit": "",
+  "model": "",
+  "started_at": "",
+  "finished_at": "",
+  "status": "invalid",
+  "attempt": 1,
+  "exit_code": null,
+  "usage": {
+    "input_tokens": null,
+    "output_tokens": null,
+    "model_turns": null,
+    "tool_calls": null
+  },
+  "evidence_paths": [],
+  "checks": [],
+  "target_head_unchanged": null,
+  "target_worktree_clean": null,
+  "stdout_file": "stdout.txt",
+  "stderr_file": "stderr.txt",
+  "review_notes": ""
+}

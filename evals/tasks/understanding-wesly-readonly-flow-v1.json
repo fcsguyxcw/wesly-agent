@@ -1,0 +1,28 @@
+{
+  "id": "understanding-wesly-readonly-flow",
+  "version": 1,
+  "category": "understanding",
+  "repository": {
+    "url": "https://github.com/fcsguyxcw/wesly-agent.git",
+    "commit": "6dcb15b7c55f028a640a507d8db4422037f3205a"
+  },
+  "prompt": "请追踪 wesly 执行一个需要读取文件的问题时的主路径：从 CLI 创建 Agent，到 Agent 调用 read_file、把工具结果送回模型，再到最终文件证据校验。重点解释 cli.py、agent.py、tools.py、evidence.py 四个模块的职责。最终答案只引用你本次实际搜索或读取过的这四个真实路径，不要展示示例路径或引用格式。不要修改任何文件。",
+  "success_criteria": [
+    "回答说明 CLI、Agent、ToolRegistry 和 evidence validation 的调用关系",
+    "回答明确说明 read_file 结果作为工具数据回到模型，最终引用由 Agent 校验",
+    "引用至少覆盖 src/wesly/cli.py、src/wesly/agent.py、src/wesly/tools.py 和 src/wesly/evidence.py",
+    "所有文件引用均来自本次运行的真实搜索或读取证据"
+  ],
+  "forbidden_changes": [
+    "目标仓库 HEAD 变化",
+    "目标仓库出现任何 tracked 或 untracked 工作区变化",
+    "运行记录包含 DEEPSEEK_API_KEY"
+  ],
+  "limits": {
+    "input_tokens": 57344,
+    "output_tokens": 8192,
+    "model_turns": 12,
+    "tool_calls": 30,
+    "wall_clock_seconds": 600
+  }
+}

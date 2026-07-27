@@ -1,6 +1,8 @@
 from collections.abc import Sequence
+from pathlib import Path
 
 from wesly.agent import Agent
+from wesly.context import INPUT_TOKEN_BUDGET, ReadOnlyContextBuilder
 from wesly.events import ModelCompleted, ModelStarted, RunCompleted, RunFailed
 from wesly.model import ModelProviderError, ModelRequest, ModelTurn, Usage
 
@@ -87,6 +89,56 @@ def test_agent_rejects_an_empty_direct_answer() -> None:
             stop_reason="provider_error",
             message="模型响应不包含答案",
             model_turns=1,
+            tool_calls=0,
+        ),
+    ]
+
+
+class MustNotBeCalledModelClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, request: ModelRequest) -> ModelTurn:
+        self.calls += 1
+        raise AssertionError("model must not be called after context limit")
+
+
+def test_agent_stops_before_model_call_when_context_exceeds_budget(
+    tmp_path: Path,
+) -> None:
+    client = MustNotBeCalledModelClient()
+    agent = Agent(
+        client,
+        context_builder=ReadOnlyContextBuilder(
+            tmp_path,
+            global_instructions_path=tmp_path / "missing-global.md",
+        ),
+    )
+
+    events = list(agent.run("x" * (INPUT_TOKEN_BUDGET * 3 + 1)))
+
+    assert client.calls == 0
+    assert len(events) == 1
+    assert isinstance(events[0], RunFailed)
+    assert events[0].stop_reason == "context_limit"
+    assert events[0].model_turns == 0
+    assert "estimated_input_tokens=" in events[0].message
+
+
+class InterruptingModelClient:
+    def complete(self, request: ModelRequest) -> ModelTurn:
+        raise KeyboardInterrupt
+
+
+def test_agent_maps_keyboard_interrupt_to_an_explicit_stop() -> None:
+    events = list(Agent(InterruptingModelClient()).run("检查项目"))
+
+    assert events == [
+        ModelStarted(turn=1),
+        RunFailed(
+            stop_reason="interrupted",
+            message="任务已由用户中断",
+            model_turns=0,
             tool_calls=0,
         ),
     ]

@@ -136,6 +136,7 @@ def test_adapter_maps_tools_and_tool_history_to_provider_format(
 
     assert completions.request is not None
     assert completions.request["tools"] == list(request.tools)
+    assert completions.request["max_tokens"] == 8 * 1024
     assert completions.request["messages"][-2:] == [
         {
             "role": "assistant",

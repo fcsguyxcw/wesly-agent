@@ -1,6 +1,10 @@
 from collections.abc import Iterator
 
-from wesly.context import ContextBuilder, DirectAnswerContextBuilder
+from wesly.context import (
+    ContextBuilder,
+    ContextLimitError,
+    DirectAnswerContextBuilder,
+)
 from wesly.evidence import extract_file_citations
 from wesly.events import (
     AgentEvent,
@@ -37,11 +41,27 @@ class Agent:
         observed_evidence: set[str] = set()
 
         for turn in range(1, self._max_model_turns + 1):
+            try:
+                request = self._context_builder.build(task, history)
+            except ContextLimitError as error:
+                yield RunFailed(
+                    stop_reason="context_limit",
+                    message=str(error),
+                    model_turns=turn - 1,
+                    tool_calls=tool_calls,
+                )
+                return
             yield ModelStarted(turn=turn)
             try:
-                model_turn = self._model_client.complete(
-                    self._context_builder.build(task, history)
+                model_turn = self._model_client.complete(request)
+            except KeyboardInterrupt:
+                yield RunFailed(
+                    stop_reason="interrupted",
+                    message="任务已由用户中断",
+                    model_turns=turn - 1,
+                    tool_calls=tool_calls,
                 )
+                return
             except ModelProviderError as error:
                 yield RunFailed(
                     stop_reason="provider_error",
@@ -92,7 +112,16 @@ class Agent:
                         tool_name=call.name,
                         target=target,
                     )
-                    result = self._tool_registry.execute(call)
+                    try:
+                        result = self._tool_registry.execute(call)
+                    except KeyboardInterrupt:
+                        yield RunFailed(
+                            stop_reason="interrupted",
+                            message="任务已由用户中断",
+                            model_turns=turn,
+                            tool_calls=tool_calls,
+                        )
+                        return
                     tool_calls += 1
                     observed_evidence.update(result.evidence_paths)
                     yield ToolCompleted(

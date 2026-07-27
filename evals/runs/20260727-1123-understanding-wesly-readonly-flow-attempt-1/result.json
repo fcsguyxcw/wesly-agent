@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "run_id": "20260727-1123-understanding-wesly-readonly-flow-attempt-1",
+  "task_id": "understanding-wesly-readonly-flow",
+  "task_version": 1,
+  "repository_commit": "6dcb15b7c55f028a640a507d8db4422037f3205a",
+  "wesly_commit": null,
+  "wesly_base_commit": "6dcb15b7c55f028a640a507d8db4422037f3205a",
+  "wesly_worktree_diff_hash": "6e4cc3ec966712f90932a0f634e57d9c68299657",
+  "model": "deepseek-v4-pro",
+  "recorded_at": "2026-07-27T11:23:32+08:00",
+  "status": "pass",
+  "attempt": 1,
+  "exit_code": 0,
+  "usage": {
+    "input_tokens": 54509,
+    "output_tokens": 2123,
+    "model_turns": 8,
+    "tool_calls": 10
+  },
+  "max_request_input_tokens": 14704,
+  "evidence_paths": [
+    "src/wesly/cli.py",
+    "src/wesly/agent.py",
+    "src/wesly/tools.py",
+    "src/wesly/evidence.py"
+  ],
+  "checks": [
+    {"name": "traces CLI Agent ToolRegistry and evidence validation", "passed": true},
+    {"name": "explains tool-result return and final evidence validation", "passed": true},
+    {"name": "cites all four required observed files", "passed": true},
+    {"name": "contains no unobserved file citation", "passed": true},
+    {"name": "contains no credential", "passed": true}
+  ],
+  "target_head_unchanged": true,
+  "target_worktree_clean": true,
+  "answer_file": "answer.md",
+  "review_notes": "Manual review against the frozen task criteria passed. This pre-commit acceptance run is identified by wesly_base_commit plus wesly_worktree_diff_hash."
+}

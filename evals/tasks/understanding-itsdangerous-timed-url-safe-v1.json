@@ -1,0 +1,29 @@
+{
+  "id": "understanding-itsdangerous-timed-url-safe",
+  "version": 1,
+  "category": "understanding",
+  "repository": {
+    "url": "https://github.com/pallets/itsdangerous.git",
+    "commit": "672971d66a2ef9f85151e53283113f33d642dabd"
+  },
+  "prompt": "请解释 URLSafeTimedSerializer 如何把 URL-safe 序列化与带时间戳签名组合起来。沿 dumps 和 loads 两条路径追踪关键类与方法，说明压缩/base64、TimestampSigner、max_age 过期检查分别发生在哪里，并用实际读取到的工作区相对路径引用证据。不要修改任何文件。",
+  "success_criteria": [
+    "回答说明 URLSafeTimedSerializer 通过 URLSafeSerializerMixin 与 TimedSerializer 组合行为",
+    "回答追踪 Serializer.dumps 到 URL-safe payload 编码，以及 TimedSerializer.loads 到 TimestampSigner.unsign 的路径",
+    "回答准确说明 max_age 在时间戳签名验证期间执行过期检查",
+    "引用至少覆盖 src/itsdangerous/url_safe.py、src/itsdangerous/timed.py 和 src/itsdangerous/serializer.py",
+    "所有文件引用均来自本次运行的真实搜索或读取证据"
+  ],
+  "forbidden_changes": [
+    "目标仓库 HEAD 变化",
+    "目标仓库出现任何 tracked 或 untracked 工作区变化",
+    "运行记录包含 DEEPSEEK_API_KEY"
+  ],
+  "limits": {
+    "input_tokens": 57344,
+    "output_tokens": 8192,
+    "model_turns": 12,
+    "tool_calls": 30,
+    "wall_clock_seconds": 600
+  }
+}

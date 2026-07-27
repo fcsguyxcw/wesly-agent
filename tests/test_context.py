@@ -6,8 +6,12 @@ from typing import cast
 import pytest
 
 from wesly.context import (
+    CONTEXT_POLICY_VERSION,
+    ContextLimitError,
     DirectAnswerContextBuilder,
+    INPUT_TOKEN_BUDGET,
     InstructionLoadError,
+    OUTPUT_TOKEN_BUDGET,
     ReadOnlyContextBuilder,
 )
 from wesly.model import Message, ModelBudget, ModelRequest
@@ -39,7 +43,49 @@ def test_read_only_context_exposes_the_three_tools_and_citation_contract(
     ]
     tool_names = [definition["name"] for definition in function_definitions]
     assert tool_names == ["list_workspace", "search_text", "read_file"]
-    assert "[[workspace/relative/path]]" in request.instructions[0]
+    assert all("next_cursor" in str(definition["description"]) for definition in function_definitions)
+    assert "actual observed workspace-relative path" in request.instructions[0]
+    assert "[[" not in request.instructions[0]
+    assert "continue with its next_cursor" in request.instructions[0]
+    assert CONTEXT_POLICY_VERSION in request.instructions[1]
+    assert request.budget == ModelBudget(
+        input_tokens=INPUT_TOKEN_BUDGET,
+        output_tokens=OUTPUT_TOKEN_BUDGET,
+    )
+
+
+def test_chronological_context_preserves_current_task_then_history(
+    tmp_path: Path,
+) -> None:
+    history = (
+        Message(role="assistant", content=None),
+        Message(role="tool", content='{"page":1}', tool_call_id="call-1"),
+        Message(role="assistant", content="继续调查"),
+    )
+
+    request = ReadOnlyContextBuilder(
+        tmp_path,
+        global_instructions_path=tmp_path / "missing-global.md",
+    ).build("当前任务", history)
+
+    assert request.messages == (Message(role="user", content="当前任务"), *history)
+
+
+def test_context_limit_reports_budget_composition(tmp_path: Path) -> None:
+    builder = ReadOnlyContextBuilder(
+        tmp_path,
+        global_instructions_path=tmp_path / "missing-global.md",
+    )
+
+    with pytest.raises(ContextLimitError) as raised:
+        builder.build("x" * (INPUT_TOKEN_BUDGET * 3 + 1))
+
+    assert raised.value.estimated_input_tokens > INPUT_TOKEN_BUDGET
+    assert raised.value.input_token_budget == INPUT_TOKEN_BUDGET
+    assert raised.value.largest_component == "messages"
+    assert "instructions=" in str(raised.value)
+    assert "messages=" in str(raised.value)
+    assert "tools=" in str(raised.value)
 
 
 def test_read_only_context_loads_scoped_instructions_with_metadata_and_precedence(

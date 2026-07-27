@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import wesly.cli
 from wesly.cli import run_cli
 from wesly.model import ModelProviderError, ModelRequest, ModelTurn, ToolCall, Usage
 
@@ -69,6 +70,82 @@ def test_cli_reports_provider_failure_with_a_nonzero_exit() -> None:
     assert exit_code == 1
     assert stdout.getvalue() == "[model] 正在调用模型\n"
     assert stderr.getvalue() == "[error] provider_error: 模型服务暂时不可用\n"
+
+
+def test_cli_returns_130_for_keyboard_interrupt() -> None:
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = run_cli(
+        ["检查项目"],
+        model_client=InterruptingModelClient(),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 130
+    assert stdout.getvalue() == "[model] 正在调用模型\n"
+    assert stderr.getvalue() == "[error] interrupted: 任务已由用户中断\n"
+
+
+def test_cli_returns_130_when_context_creation_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def interrupt_context(workspace: Path) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(wesly.cli, "ReadOnlyContextBuilder", interrupt_context)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = run_cli(
+        ["检查项目"],
+        model_client=ScriptedModelClient([]),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 130
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "[error] interrupted: 任务已由用户中断\n"
+
+
+class InterruptingModelClient:
+    def complete(self, request: ModelRequest) -> ModelTurn:
+        raise KeyboardInterrupt
+
+
+def test_verbose_output_adds_safe_diagnostics_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-test-secret-value"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    stdout = StringIO()
+    stderr = StringIO()
+    client = ScriptedModelClient(
+        [
+            ModelTurn(
+                content="完成",
+                tool_calls=(),
+                finish_reason="stop",
+                usage=Usage(input_tokens=3, output_tokens=1),
+            )
+        ]
+    )
+
+    exit_code = run_cli(
+        ["检查项目"],
+        model_client=client,
+        stdout=stdout,
+        stderr=stderr,
+        verbose=True,
+    )
+
+    assert exit_code == 0
+    assert "[detail] model_turn=1\n" in stdout.getvalue()
+    assert "[detail] finish_reason=stop input_tokens=3 output_tokens=1\n" in stdout.getvalue()
+    assert secret not in stdout.getvalue()
+    assert secret not in stderr.getvalue()
 
 
 def test_cli_reports_instruction_limit_before_calling_model(

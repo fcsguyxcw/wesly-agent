@@ -89,3 +89,25 @@ def test_agent_fails_when_answer_cites_unobserved_file(tmp_path: Path) -> None:
         model_turns=1,
         tool_calls=0,
     )
+
+
+def test_agent_ignores_citation_syntax_examples_inside_code(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    agent = make_agent(
+        tmp_path,
+        [
+            turn(ToolCall("read", "read_file", '{"path":"app.py"}')),
+            turn(
+                content=(
+                    "引用语法示例是 `[[path/to/file]]`。\n"
+                    "```text\n[[...]]\n```\n"
+                    "实际依据见 [[app.py]]。"
+                )
+            ),
+        ],
+    )
+
+    events = list(agent.run("读取 app.py"))
+
+    assert isinstance(events[-1], RunCompleted)
+    assert events[-1].evidence_paths == ("app.py",)
