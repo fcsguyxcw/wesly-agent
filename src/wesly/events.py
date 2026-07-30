@@ -72,6 +72,7 @@ class ToolCompleted:
     command_purpose: CommandPurpose | None = None
     change_tracking_complete: bool | None = None
     message: Message | None = field(default=None, compare=False, repr=False)
+    evidence_paths: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True, slots=True)

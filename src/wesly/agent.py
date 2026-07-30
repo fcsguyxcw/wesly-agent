@@ -54,11 +54,12 @@ class Agent:
         history: Sequence[Message] = (),
         *,
         verification_state: Literal["clean", "required", "failed"] = "clean",
+        observed_evidence: Sequence[str] = (),
     ) -> Iterator[AgentEvent]:
         current_history = list(history)
         tool_calls = 0
         usage = Usage(input_tokens=0, output_tokens=0)
-        observed_evidence: set[str] = set()
+        current_observed_evidence = set(observed_evidence)
 
         for turn in range(1, self._max_model_turns + 1):
             try:
@@ -232,7 +233,7 @@ class Agent:
                         )
                         return
                     tool_calls += 1
-                    observed_evidence.update(result.evidence_paths)
+                    current_observed_evidence.update(result.evidence_paths)
                     if result.tool_name == "run_command" and result.command_purpose == "verify":
                         if result.status == "error":
                             verification_state = "failed"
@@ -264,6 +265,7 @@ class Agent:
                         command_purpose=result.command_purpose,
                         change_tracking_complete=result.change_tracking_complete,
                         message=tool_message,
+                        evidence_paths=result.evidence_paths,
                     )
                     current_history.append(tool_message)
                 continue
@@ -296,7 +298,7 @@ class Agent:
                 return
             citations = extract_file_citations(model_turn.content)
             missing_evidence = tuple(
-                path for path in citations if path not in observed_evidence
+                path for path in citations if path not in current_observed_evidence
             )
             if missing_evidence:
                 yield RunFailed(

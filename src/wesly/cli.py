@@ -29,7 +29,12 @@ from wesly.events import (
 )
 from wesly.model import ModelClient
 from wesly.permissions import ApprovalDecision, ApprovalTimedOutError, PreparedOperation
-from wesly.sessions import SessionRecord, SessionStorageError, SessionStore
+from wesly.sessions import (
+    SessionOutcomeUnknownError,
+    SessionRecord,
+    SessionStorageError,
+    SessionStore,
+)
 from wesly.tools import ToolRegistry
 
 
@@ -56,6 +61,7 @@ def run_cli(
             task = session.goal
             history = session_store.load_history(session.session_id)
             verification_state = session_store.load_verification_state(session.session_id)
+            observed_evidence = session_store.load_observed_evidence(session.session_id)
             context_builder = PinnedContextBuilder(session.instructions)
             print(f"[session] 恢复 {session.session_id}", file=stdout)
         else:
@@ -66,6 +72,7 @@ def run_cli(
             context_builder = new_context_builder
             history = ()
             verification_state = "clean"
+            observed_evidence = ()
             session = (
                 session_store.create_session(
                     workspace,
@@ -82,6 +89,9 @@ def run_cli(
         return 130
     except InstructionLoadError as error:
         print(f"[error] {error.error_code}: {error}", file=stderr)
+        return 1
+    except SessionOutcomeUnknownError as error:
+        print(f"[error] outcome_unknown: {error}", file=stderr)
         return 1
     except SessionStorageError as error:
         print(f"[error] session_error: {error}", file=stderr)
@@ -107,6 +117,7 @@ def run_cli(
             task,
             history,
             verification_state=verification_state,
+            observed_evidence=observed_evidence,
         ):
             if (
                 session_store is not None

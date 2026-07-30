@@ -278,7 +278,7 @@ class ReadOnlyContextBuilder:
             "repeat the same paginated request without changing the cursor. "
             "Every file citation must enclose an actual observed workspace-relative "
             "path in two square brackets on each side. Only cite files returned by "
-            "search_text or read_file in this run, and never use citation brackets "
+            "search_text or read_file in this Session, and never use citation brackets "
             "for placeholder or example text.",
             self._workspace_snapshot.render(),
             *(block.render() for block in self._instruction_snapshot.blocks),

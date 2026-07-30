@@ -10,16 +10,34 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-from wesly.events import AgentEvent, ModelCompleted, ModelStarted, RunCompleted, RunFailed
+from wesly.events import (
+    AgentEvent,
+    ModelCompleted,
+    ModelStarted,
+    RunCompleted,
+    RunFailed,
+    ToolCompleted,
+)
 from wesly.model import Message, ToolCall
 
 
 SCHEMA_VERSION = 1
-SessionStatus = Literal["running", "completed", "failed", "interrupted"]
+SessionStatus = Literal[
+    "running",
+    "completed",
+    "failed",
+    "interrupted",
+]
+READ_ONLY_TOOLS = frozenset({"list_workspace", "search_text", "read_file"})
+APPROVAL_TOOLS = frozenset({"apply_file_operations", "run_command"})
 
 
 class SessionStorageError(Exception):
     """A local session database operation failed without a partial commit."""
+
+
+class SessionOutcomeUnknownError(SessionStorageError):
+    """A side-effecting call may have completed before its result was persisted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +49,14 @@ class SessionRecord:
     created_at: str
     updated_at: str
     instructions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _IncompleteToolCall:
+    call: ToolCall
+    target: str
+    started: bool
+    approved: bool
 
 
 class SessionStore:
@@ -144,6 +170,7 @@ class SessionStore:
         if row is None:
             raise SessionStorageError("当前工作区没有可恢复的 Session")
         record = _row_to_session(row)
+        self._reconcile_incomplete_tool_calls(record.session_id)
         self._append_raw_event(
             record.session_id,
             "session_resumed",
@@ -177,7 +204,10 @@ class SessionStore:
         if isinstance(event, RunCompleted):
             status = "completed"
         elif isinstance(event, RunFailed):
-            status = "interrupted" if event.stop_reason == "interrupted" else "failed"
+            if event.stop_reason == "interrupted":
+                status = "interrupted"
+            else:
+                status = "failed"
         payload = asdict(event)
         self._append_raw_event(
             session_id,
@@ -218,6 +248,25 @@ class SessionStore:
                 )
             )
         return tuple(messages)
+
+    def load_observed_evidence(self, session_id: str) -> tuple[str, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT payload_json FROM events
+            WHERE session_id = ? AND event_type = 'tool_completed'
+            ORDER BY sequence
+            """,
+            (session_id,),
+        ).fetchall()
+        evidence: list[str] = []
+        for row in rows:
+            payload = json.loads(str(row["payload_json"]))
+            if payload["status"] != "success":
+                continue
+            for path in payload.get("evidence_paths", ()):
+                if path not in evidence:
+                    evidence.append(path)
+        return tuple(evidence)
 
     def load_verification_state(
         self,
@@ -341,6 +390,113 @@ class SessionStore:
                     raise SessionStorageError(f"Session 不存在: {session_id}")
         except sqlite3.Error as error:
             raise SessionStorageError(f"无法追加 Session 事件: {error}") from error
+
+    def _reconcile_incomplete_tool_calls(self, session_id: str) -> None:
+        incomplete = self._find_incomplete_tool_calls(session_id)
+        for item in incomplete:
+            if not item.started or item.call.name in READ_ONLY_TOOLS:
+                self._append_recovery_tool_result(
+                    session_id,
+                    item,
+                    "recovery_retry_required",
+                    "上次进程未保存工具结果；请重新发起这个工具调用",
+                )
+                continue
+            if item.call.name in APPROVAL_TOOLS and not item.approved:
+                self._append_recovery_tool_result(
+                    session_id,
+                    item,
+                    "approval_expired",
+                    "上次一次性审批未形成可证明结果，已失效；如需执行请重新申请",
+                )
+                continue
+            self._append_raw_event(
+                session_id,
+                "session_resume_blocked",
+                {
+                    "call_id": item.call.id,
+                    "tool_name": item.call.name,
+                    "reason": "outcome_unknown",
+                },
+                status="interrupted",
+            )
+            raise SessionOutcomeUnknownError(
+                f"工具 {item.call.name} ({item.call.id}) 可能已产生副作用但结果未持久化；"
+                "请先检查工作区，再决定如何处理"
+            )
+
+    def _append_recovery_tool_result(
+        self,
+        session_id: str,
+        item: _IncompleteToolCall,
+        error_code: str,
+        message: str,
+    ) -> None:
+        tool_message = Message(
+            role="tool",
+            content=json.dumps(
+                {"error_code": error_code, "message": message},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            tool_call_id=item.call.id,
+        )
+        self.append_event(
+            session_id,
+            ToolCompleted(
+                call_id=item.call.id,
+                tool_name=item.call.name,
+                status="error",
+                target=item.target,
+                error_code=error_code,
+                message=tool_message,
+            ),
+        )
+
+    def _find_incomplete_tool_calls(
+        self,
+        session_id: str,
+    ) -> tuple[_IncompleteToolCall, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT event_type, payload_json FROM events
+            WHERE session_id = ?
+            ORDER BY sequence
+            """,
+            (session_id,),
+        ).fetchall()
+        calls: list[ToolCall] = []
+        completed: set[str] = set()
+        started: dict[str, str] = {}
+        approved: set[str] = set()
+        for row in rows:
+            event_type = str(row["event_type"])
+            payload = json.loads(str(row["payload_json"]))
+            if event_type == "model_completed" and payload.get("message") is not None:
+                for call in payload["message"]["tool_calls"]:
+                    calls.append(
+                        ToolCall(
+                            id=call["id"],
+                            name=call["name"],
+                            arguments_json=call["arguments_json"],
+                        )
+                    )
+            elif event_type == "tool_started":
+                started[payload["call_id"]] = payload["target"]
+            elif event_type == "approval_decided" and payload["decision"] == "allow_once":
+                approved.add(payload["call_id"])
+            elif event_type == "tool_completed":
+                completed.add(payload["call_id"])
+        return tuple(
+            _IncompleteToolCall(
+                call=call,
+                target=started.get(call.id, call.name),
+                started=call.id in started,
+                approved=call.id in approved,
+            )
+            for call in calls
+            if call.id not in completed
+        )
 
     def _initialize_schema(self) -> None:
         current_version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
