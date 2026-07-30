@@ -279,7 +279,7 @@ def test_resume_blocks_an_incomplete_side_effect_as_outcome_unknown(
     ) == 1
     assert client.requests == []
     assert "[error] outcome_unknown:" in stderr.getvalue()
-    assert store.get_session(session.session_id).status == "interrupted"
+    assert store.get_session(session.session_id).status == "outcome_unknown"
     with sqlite3.connect(store.database_path) as connection:
         payload = connection.execute(
             """
@@ -326,7 +326,7 @@ def test_resume_never_reuses_approval_without_a_persisted_result(tmp_path: Path)
     with pytest.raises(SessionOutcomeUnknownError):
         store.resume_session(tmp_path)
 
-    assert store.get_session(session.session_id).status == "interrupted"
+    assert store.get_session(session.session_id).status == "outcome_unknown"
     store.close()
 
 

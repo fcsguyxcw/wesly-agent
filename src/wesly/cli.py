@@ -263,18 +263,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wesly")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("command_or_task")
-    parser.add_argument("value", nargs="?")
+    parser.add_argument("values", nargs="*")
     arguments = parser.parse_args(argv)
 
     if arguments.command_or_task == "sessions":
-        if arguments.value is not None:
-            parser.error("sessions 不接受额外参数")
+        values = tuple(arguments.values)
+        if values and not (len(values) == 2 and values[0] == "delete"):
+            parser.error("用法: wesly sessions [delete <session-id>]")
         try:
             session_store = SessionStore.default(redact=_redact_secrets)
         except SessionStorageError as error:
             print(f"错误: 无法打开 Session 数据库: {error}", file=sys.stderr)
             return 2
         try:
+            if values:
+                return _delete_session(
+                    session_store,
+                    Path.cwd(),
+                    values[1],
+                    sys.stdin,
+                    sys.stdout,
+                    sys.stderr,
+                )
             return _list_sessions(session_store, Path.cwd(), sys.stdout)
         finally:
             session_store.close()
@@ -294,6 +304,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_client = create_deepseek_adapter(api_key=api_key, model=model)
     try:
         if arguments.command_or_task == "resume":
+            if len(arguments.values) > 1:
+                parser.error("用法: wesly resume [session-id]")
             return run_cli(
                 [],
                 model_client=model_client,
@@ -302,9 +314,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verbose=arguments.verbose,
                 session_store=session_store,
                 resume=True,
-                resume_session_id=arguments.value,
+                resume_session_id=(arguments.values[0] if arguments.values else None),
             )
-        if arguments.value is not None:
+        if arguments.values:
             parser.error("任务必须作为一个带引号的参数传入")
         return run_cli(
             [arguments.command_or_task],
@@ -331,6 +343,41 @@ def _list_sessions(store: SessionStore, workspace: Path, stdout: TextIO) -> int:
             f"{_safe_prompt_text(session.goal)}",
             file=stdout,
         )
+    return 0
+
+
+def _delete_session(
+    store: SessionStore,
+    workspace: Path,
+    session_id: str,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        session = store.get_workspace_session(workspace, session_id)
+    except SessionStorageError as error:
+        print(f"[error] session_error: {error}", file=stderr)
+        return 1
+    print(
+        f"将永久删除 Session {_safe_prompt_text(session.session_id)}: "
+        f"{_safe_prompt_text(session.goal)}",
+        file=stdout,
+    )
+    print("输入 delete 确认；其他输入取消:", file=stdout, flush=True)
+    try:
+        confirmation = stdin.readline().strip()
+    except (KeyboardInterrupt, OSError):
+        confirmation = ""
+    if confirmation != "delete":
+        print("已取消删除", file=stdout)
+        return 0
+    try:
+        store.delete_session(workspace, session.session_id)
+    except SessionStorageError as error:
+        print(f"[error] session_error: {error}", file=stderr)
+        return 1
+    print(f"已删除 Session {_safe_prompt_text(session.session_id)}", file=stdout)
     return 0
 
 

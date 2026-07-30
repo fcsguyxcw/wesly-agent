@@ -49,6 +49,51 @@ def test_cli_process_lists_workspace_sessions_without_api_key(tmp_path: Path) ->
     assert "检查项目" in result.stdout
 
 
+def test_cli_process_deletes_session_only_after_exact_confirmation(tmp_path: Path) -> None:
+    database_path = tmp_path / "Wesly" / "wesly.db"
+    store = SessionStore(database_path)
+    session = store.create_session(Path.cwd(), "检查项目", ("fixed",))
+    store.close()
+    environment = os.environ.copy()
+    environment.pop("DEEPSEEK_API_KEY", None)
+    environment["LOCALAPPDATA"] = str(tmp_path)
+    environment["PYTHONUTF8"] = "1"
+    command = [
+        sys.executable,
+        "-m",
+        "wesly.cli",
+        "sessions",
+        "delete",
+        session.session_id,
+    ]
+
+    cancelled = subprocess.run(
+        command,
+        input="yes\n",
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        env=environment,
+    )
+    assert cancelled.returncode == 0
+    assert "已取消删除" in cancelled.stdout
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+
+    deleted = subprocess.run(
+        command,
+        input="delete\n",
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        env=environment,
+    )
+    assert deleted.returncode == 0
+    assert f"已删除 Session {session.session_id}" in deleted.stdout
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
 def run_scripted_cli(
     mode: str,
     environment_updates: dict[str, str] | None = None,

@@ -23,9 +23,10 @@ uv run wesly "解释这个项目"
 uv run wesly sessions
 uv run wesly resume
 uv run wesly resume <session-id>
+uv run wesly sessions delete <session-id>
 ```
 
-直接运行新任务始终创建新 Session，不会自动注入旧任务历史。数据库默认位于 `%LOCALAPPDATA%\Wesly\wesly.db`。
+直接运行新任务始终创建新 Session，不会自动注入旧任务历史。Session 默认长期保留；删除必须指定完整 ID，并在提示后输入 `delete` 确认。数据库默认位于 `%LOCALAPPDATA%\Wesly\wesly.db`。
 
 需要查看安全的事件 ID、结束原因和单轮 token usage 时使用：
 
