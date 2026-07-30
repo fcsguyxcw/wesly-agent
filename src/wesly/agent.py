@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import Literal
 
 from wesly.context import (
@@ -48,16 +48,21 @@ class Agent:
         self._max_model_turns = max_model_turns
         self._max_tool_calls = max_tool_calls
 
-    def run(self, task: str) -> Iterator[AgentEvent]:
-        history: list[Message] = []
+    def run(
+        self,
+        task: str,
+        history: Sequence[Message] = (),
+        *,
+        verification_state: Literal["clean", "required", "failed"] = "clean",
+    ) -> Iterator[AgentEvent]:
+        current_history = list(history)
         tool_calls = 0
         usage = Usage(input_tokens=0, output_tokens=0)
         observed_evidence: set[str] = set()
-        verification_state: Literal["clean", "required", "failed"] = "clean"
 
         for turn in range(1, self._max_model_turns + 1):
             try:
-                request = self._context_builder.build(task, history)
+                request = self._context_builder.build(task, current_history)
             except ContextLimitError as error:
                 yield RunFailed(
                     stop_reason="context_limit",
@@ -90,18 +95,18 @@ class Agent:
                 input_tokens=usage.input_tokens + model_turn.usage.input_tokens,
                 output_tokens=usage.output_tokens + model_turn.usage.output_tokens,
             )
+            assistant_message = Message(
+                role="assistant",
+                content=model_turn.content,
+                tool_calls=model_turn.tool_calls,
+            )
             yield ModelCompleted(
                 turn=turn,
                 finish_reason=model_turn.finish_reason,
                 usage=model_turn.usage,
+                message=assistant_message,
             )
-            history.append(
-                Message(
-                    role="assistant",
-                    content=model_turn.content,
-                    tool_calls=model_turn.tool_calls,
-                )
-            )
+            current_history.append(assistant_message)
 
             if model_turn.tool_calls:
                 if self._tool_registry is None:
@@ -241,6 +246,11 @@ class Agent:
                         and result.command_purpose in {"build", "modify"}
                     ):
                         verification_state = "required"
+                    tool_message = Message(
+                        role="tool",
+                        content=result.content,
+                        tool_call_id=result.call_id,
+                    )
                     yield ToolCompleted(
                         call_id=result.call_id,
                         tool_name=result.tool_name,
@@ -253,14 +263,9 @@ class Agent:
                         output_truncated=result.output_truncated,
                         command_purpose=result.command_purpose,
                         change_tracking_complete=result.change_tracking_complete,
+                        message=tool_message,
                     )
-                    history.append(
-                        Message(
-                            role="tool",
-                            content=result.content,
-                            tool_call_id=result.call_id,
-                        )
-                    )
+                    current_history.append(tool_message)
                 continue
 
             if not model_turn.content:

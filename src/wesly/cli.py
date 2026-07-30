@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import TextIO
 
 from wesly.agent import Agent
-from wesly.context import InstructionLoadError, ReadOnlyContextBuilder
+from wesly.context import (
+    ContextBuilder,
+    InstructionLoadError,
+    PinnedContextBuilder,
+    ReadOnlyContextBuilder,
+)
 from wesly.deepseek import create_deepseek_adapter
 from wesly.events import (
     ApprovalDecided,
@@ -24,6 +29,7 @@ from wesly.events import (
 )
 from wesly.model import ModelClient
 from wesly.permissions import ApprovalDecision, ApprovalTimedOutError, PreparedOperation
+from wesly.sessions import SessionRecord, SessionStorageError, SessionStore
 from wesly.tools import ToolRegistry
 
 
@@ -35,29 +41,83 @@ def run_cli(
     stderr: TextIO,
     stdin: TextIO | None = None,
     verbose: bool = False,
+    session_store: SessionStore | None = None,
+    resume: bool = False,
+    resume_session_id: str | None = None,
 ) -> int:
-    task = args[0]
     workspace = Path.cwd()
+    session: SessionRecord | None
+    context_builder: ContextBuilder
     try:
-        context_builder = ReadOnlyContextBuilder(workspace)
+        if resume:
+            if session_store is None:
+                raise SessionStorageError("恢复 Session 需要持久化存储")
+            session = session_store.resume_session(workspace, resume_session_id)
+            task = session.goal
+            history = session_store.load_history(session.session_id)
+            verification_state = session_store.load_verification_state(session.session_id)
+            context_builder = PinnedContextBuilder(session.instructions)
+            print(f"[session] 恢复 {session.session_id}", file=stdout)
+        else:
+            if not args:
+                raise SessionStorageError("缺少任务目标")
+            task = args[0]
+            new_context_builder = ReadOnlyContextBuilder(workspace)
+            context_builder = new_context_builder
+            history = ()
+            verification_state = "clean"
+            session = (
+                session_store.create_session(
+                    workspace,
+                    task,
+                    new_context_builder.instructions,
+                )
+                if session_store is not None
+                else None
+            )
+            if session is not None:
+                print(f"[session] 新建 {session.session_id}", file=stdout)
     except KeyboardInterrupt:
         print("[error] interrupted: 任务已由用户中断", file=stderr)
         return 130
     except InstructionLoadError as error:
         print(f"[error] {error.error_code}: {error}", file=stderr)
         return 1
+    except SessionStorageError as error:
+        print(f"[error] session_error: {error}", file=stderr)
+        return 1
+
+    def persist_approval(event: ApprovalRequested | ApprovalDecided) -> None:
+        if session_store is not None and session is not None:
+            session_store.append_event(session.session_id, event)
+
     agent = Agent(
         model_client,
         context_builder=context_builder,
         tool_registry=ToolRegistry(workspace),
         approval_provider=_TerminalApprovalProvider(stdin or sys.stdin, stdout),
+        approval_audit=persist_approval,
     )
     changed_paths: list[str] = []
     verifications: list[ToolCompleted] = []
     change_tracking_complete = True
     last_action: str | None = None
     try:
-        for event in agent.run(task):
+        for event in agent.run(
+            task,
+            history,
+            verification_state=verification_state,
+        ):
+            if (
+                session_store is not None
+                and session is not None
+                and not isinstance(event, (ApprovalRequested, ApprovalDecided))
+            ):
+                try:
+                    session_store.append_event(session.session_id, event)
+                except SessionStorageError as error:
+                    print(f"[error] persistence_error: {error}", file=stderr)
+                    return 1
             if isinstance(event, ModelStarted):
                 print("[model] 正在调用模型", file=stdout)
                 if verbose:
@@ -191,23 +251,76 @@ def main(argv: Sequence[str] | None = None) -> int:
     _configure_standard_streams()
     parser = argparse.ArgumentParser(prog="wesly")
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("task")
+    parser.add_argument("command_or_task")
+    parser.add_argument("value", nargs="?")
     arguments = parser.parse_args(argv)
+
+    if arguments.command_or_task == "sessions":
+        if arguments.value is not None:
+            parser.error("sessions 不接受额外参数")
+        try:
+            session_store = SessionStore.default(redact=_redact_secrets)
+        except SessionStorageError as error:
+            print(f"错误: 无法打开 Session 数据库: {error}", file=sys.stderr)
+            return 2
+        try:
+            return _list_sessions(session_store, Path.cwd(), sys.stdout)
+        finally:
+            session_store.close()
 
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         print("错误: 未设置 DEEPSEEK_API_KEY", file=sys.stderr)
         return 2
 
+    try:
+        session_store = SessionStore.default(redact=_redact_secrets)
+    except SessionStorageError as error:
+        print(f"错误: 无法打开 Session 数据库: {error}", file=sys.stderr)
+        return 2
+
     model = os.environ.get("WESLY_MODEL", "deepseek-v4-pro")
     model_client = create_deepseek_adapter(api_key=api_key, model=model)
-    return run_cli(
-        [arguments.task],
-        model_client=model_client,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        verbose=arguments.verbose,
-    )
+    try:
+        if arguments.command_or_task == "resume":
+            return run_cli(
+                [],
+                model_client=model_client,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                verbose=arguments.verbose,
+                session_store=session_store,
+                resume=True,
+                resume_session_id=arguments.value,
+            )
+        if arguments.value is not None:
+            parser.error("任务必须作为一个带引号的参数传入")
+        return run_cli(
+            [arguments.command_or_task],
+            model_client=model_client,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            verbose=arguments.verbose,
+            session_store=session_store,
+        )
+    finally:
+        session_store.close()
+
+
+def _list_sessions(store: SessionStore, workspace: Path, stdout: TextIO) -> int:
+    sessions = store.list_sessions(workspace)
+    if not sessions:
+        print("当前工作区没有 Session", file=stdout)
+        return 0
+    for session in sessions:
+        print(
+            f"{_safe_prompt_text(session.session_id)} | "
+            f"{_safe_prompt_text(session.status)} | "
+            f"{_safe_prompt_text(session.updated_at)} | "
+            f"{_safe_prompt_text(session.goal)}",
+            file=stdout,
+        )
+    return 0
 
 
 def _configure_standard_streams() -> None:

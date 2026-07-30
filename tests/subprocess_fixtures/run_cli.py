@@ -1,5 +1,7 @@
+import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from wesly.cli import run_cli
 from wesly.model import (
@@ -10,6 +12,7 @@ from wesly.model import (
     ToolCall,
     Usage,
 )
+from wesly.sessions import SessionStore
 
 
 class SuccessfulModelClient:
@@ -25,6 +28,11 @@ class SuccessfulModelClient:
 class FailingModelClient:
     def complete(self, request: ModelRequest) -> ModelTurn:
         raise ModelProviderError("模型服务暂时不可用")
+
+
+class InterruptingModelClient:
+    def complete(self, request: ModelRequest) -> ModelTurn:
+        raise KeyboardInterrupt
 
 
 class ScriptedModelClient:
@@ -67,13 +75,26 @@ elif mode == "search-read":
     )
 elif mode == "no-evidence":
     client = ScriptedModelClient([final_turn("项目说明见 [[README.md]]。")])
+elif mode == "session-interrupt":
+    client = InterruptingModelClient()
+elif mode == "session-resume":
+    client = SuccessfulModelClient()
 else:
     client = SuccessfulModelClient()
-raise SystemExit(
-    run_cli(
-        ["检查项目"],
-        model_client=client,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
+
+database_path = os.environ.get("WESLY_TEST_DB")
+store = SessionStore(Path(database_path)) if database_path else None
+try:
+    raise SystemExit(
+        run_cli(
+            [] if mode == "session-resume" else ["检查项目"],
+            model_client=client,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            session_store=store,
+            resume=mode == "session-resume",
+        )
     )
-)
+finally:
+    if store is not None:
+        store.close()

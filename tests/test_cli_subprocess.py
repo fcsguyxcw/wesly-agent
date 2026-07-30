@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+
+from wesly.sessions import SessionStore
 
 
 def test_cli_process_stops_before_network_when_api_key_is_missing() -> None:
@@ -22,9 +25,37 @@ def test_cli_process_stops_before_network_when_api_key_is_missing() -> None:
     assert result.stderr == "错误: 未设置 DEEPSEEK_API_KEY\n"
 
 
-def run_scripted_cli(mode: str) -> subprocess.CompletedProcess[str]:
+def test_cli_process_lists_workspace_sessions_without_api_key(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "Wesly" / "wesly.db")
+    session = store.create_session(Path.cwd(), "检查项目", ("fixed",))
+    store.close()
+    environment = os.environ.copy()
+    environment.pop("DEEPSEEK_API_KEY", None)
+    environment["LOCALAPPDATA"] = str(tmp_path)
+    environment["PYTHONUTF8"] = "1"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "wesly.cli", "sessions"],
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        env=environment,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert session.session_id in result.stdout
+    assert "running" in result.stdout
+    assert "检查项目" in result.stdout
+
+
+def run_scripted_cli(
+    mode: str,
+    environment_updates: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
+    environment.update(environment_updates or {})
     fixture = Path(__file__).parent / "subprocess_fixtures" / "run_cli.py"
     return subprocess.run(
         [sys.executable, str(fixture), mode],
@@ -83,3 +114,24 @@ def test_cli_process_rejects_an_unobserved_file_citation() -> None:
         "运行统计: 模型轮次 1 | 工具调用 0\n"
         "建议: 重新调查并只引用本次实际观察的文件\n"
     )
+
+
+def test_cli_process_resumes_session_after_previous_process_exits(tmp_path: Path) -> None:
+    database_path = tmp_path / "wesly.db"
+    environment = {"WESLY_TEST_DB": str(database_path)}
+
+    interrupted = run_scripted_cli("session-interrupt", environment)
+    resumed = run_scripted_cli("session-resume", environment)
+
+    assert interrupted.returncode == 130
+    assert "[session] 新建 " in interrupted.stdout
+    assert "[error] interrupted:" in interrupted.stderr
+    assert resumed.returncode == 0
+    assert "[session] 恢复 " in resumed.stdout
+    assert "子进程回答" in resumed.stdout
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert connection.execute("SELECT status FROM sessions").fetchone()[0] == "completed"
+        assert connection.execute(
+            "SELECT attempt, status FROM model_attempts ORDER BY attempt"
+        ).fetchall() == [(1, "failed"), (2, "completed")]

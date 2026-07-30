@@ -1,7 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-from wesly.model import Usage
+from wesly.model import Message, Usage
 from wesly.permissions import (
     ApprovalDecision,
     ApprovalDecisionReason,
@@ -20,6 +20,7 @@ class ModelCompleted:
     turn: int
     finish_reason: str
     usage: Usage
+    message: Message | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class ToolCompleted:
     output_truncated: bool | None = None
     command_purpose: CommandPurpose | None = None
     change_tracking_complete: bool | None = None
+    message: Message | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
